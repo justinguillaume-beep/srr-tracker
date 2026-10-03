@@ -16,13 +16,13 @@ Each push to `main` builds a debug APK and publishes it on the `latest` release.
 4. Open **SRR Tracker**. Allow the camera. Follow the three setup screens: the phone lies face-down, and the dice should sit inside the box on screen.
 5. Tap **Start**. Throw the dice into the box. When they sit still for about half a second the app says **Counting...**, then **Logged 7** (or whatever the total is) and beeps. Sevens in the list are red.
 6. If it is not sure, it asks you to tap the two dice. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it.
-7. Menu: new session, past sessions, save spreadsheet (also copied to Downloads), settings (how easily a throw is noticed, how long the dice must sit still, sound, vibration).
+7. Menu: new session, past sessions, save spreadsheet (also copied to Downloads), settings (how easily a throw is noticed, how long the dice must sit still, and a **Beep on each roll** switch that starts off). There is no vibration.
 
 The APK is a debug build signed with the debug key. Updating means downloading that same link again (the `latest` release is replaced on every push to main).
 
 ### What the Android app does
 
-The back camera stays on. It watches for motion inside the box, waits until the dice have been still (default 0.5 s), then takes the sharpest practical photo (up to 4K). Small dice are found, cropped, and enlarged before the pips are counted, so a die only about 40–80 pixels wide in a 1080p frame can still be read. A clear read is saved on its own. A doubtful read waits for you to tap the numbers. Every roll stores a smaller JPEG on the phone, with the time.
+The back camera stays on. It watches for motion inside the box, waits until the dice have been still (default 0.5 s), then takes the sharpest practical photo (up to 4K). Small dice are found, cropped, and enlarged before the pips are counted, so a die only about 40–80 pixels wide in a 1080p frame can still be read. A clear read is saved on its own and the status line says what was logged. A doubtful read waits for you to tap the numbers. Every roll stores a smaller JPEG on the phone, with the time. The beep is off until you turn on **Beep on each roll** in Settings. The phone does not vibrate.
 
 SRR is rolls per seven, shown as `1:6.0`. A fair pair of dice is `1:6.0`. The percent under it is how often a 7 showed up.
 

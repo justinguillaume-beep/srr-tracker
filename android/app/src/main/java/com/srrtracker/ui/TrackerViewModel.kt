@@ -83,8 +83,7 @@ data class UiState(
     val sessions: List<SessionSummary> = emptyList(),
     val sensitivity: Int = 50,
     val settleMs: Long = 500L,
-    val soundOn: Boolean = true,
-    val vibrateOn: Boolean = true,
+    val soundOn: Boolean = false,
     val sessionName: String = "",
     val cameraMessage: String? = null
 )
@@ -98,7 +97,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     private val db = AppDatabase.get(app)
     private val photos = PhotoStore(app)
     private val prefs = app.getSharedPreferences("srr", Application.MODE_PRIVATE)
-    private val feedback = RollFeedback(app)
+    private val feedback = RollFeedback()
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
@@ -116,15 +115,13 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         val guide = prefs.getBoolean(KEY_GUIDE, false)
         val sensitivity = prefs.getInt(KEY_SENS, 50)
         val settle = prefs.getLong(KEY_SETTLE, 500L)
-        val sound = prefs.getBoolean(KEY_SOUND, true)
-        val vibrate = prefs.getBoolean(KEY_VIBE, true)
+        val sound = prefs.getBoolean(KEY_SOUND, false)
         _ui.update {
             it.copy(
                 guideDone = guide,
                 sensitivity = sensitivity,
                 settleMs = settle,
                 soundOn = sound,
-                vibrateOn = vibrate,
                 status = if (guide) "Paused" else "Starting camera..."
             )
         }
@@ -233,7 +230,6 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             photos.delete(last.photoPath)
             db.rolls().delete(last)
-            feedback.onUndo()
             showFlash("Last roll removed", false)
         }
     }
@@ -368,11 +364,6 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(soundOn = on) }
     }
 
-    fun setVibrate(on: Boolean) {
-        prefs.edit().putBoolean(KEY_VIBE, on).apply()
-        _ui.update { it.copy(vibrateOn = on) }
-    }
-
     fun exportCsv() {
         viewModelScope.launch {
             val sessions = db.sessions().all().sortedBy { it.startedAt }
@@ -439,7 +430,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             )
         )
         val state = _ui.value
-        feedback.onLogged(total == 7, state.soundOn, state.vibrateOn)
+        feedback.onLogged(total == 7, state.soundOn)
         showFlash("Logged $total", total == 7)
     }
 
@@ -537,6 +528,5 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         private const val KEY_SENS = "sensitivity"
         private const val KEY_SETTLE = "settleMs"
         private const val KEY_SOUND = "sound"
-        private const val KEY_VIBE = "vibrate"
     }
 }

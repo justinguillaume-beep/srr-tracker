@@ -470,12 +470,8 @@ private fun SettingsDialog(vm: TrackerViewModel, state: UiState) {
             )
             Text(String.format("%.1f seconds", state.settleMs / 1000f), color = Muted, fontSize = 16.sp)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Sound", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                Text("Beep on each roll", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
                 Switch(checked = state.soundOn, onCheckedChange = { vm.setSound(it) })
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Vibration", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
-                Switch(checked = state.vibrateOn, onCheckedChange = { vm.setVibrate(it) })
             }
             BigButton("Done", { vm.closeSettings() }, Modifier.fillMaxWidth())
         }
