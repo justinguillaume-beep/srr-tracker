@@ -84,18 +84,20 @@ class MotionGateTest {
         gate.onFrame(felt(), 0)
         gate.onFrame(first, 40)
         gate.onFrame(first, 80)
-        assertTrue(gate.onFrame(first, 80 + 300).shouldCapture)
+        val capturedAt = 80L + 300L
+        assertTrue(gate.onFrame(first, capturedAt).shouldCapture)
 
+        val throwAt = capturedAt + MotionGate.POST_CAPTURE_QUIET_MS
         val traveling = felt().also { stamp(it, 280, 180, 8, 230) }
-        gate.onFrame(traveling, 500)
+        gate.onFrame(traveling, throwAt)
         val stillTravel = felt().also { stamp(it, 320, 190, 8, 230) }
-        val armed = gate.onFrame(stillTravel, 500 + 200)
+        val armed = gate.onFrame(stillTravel, throwAt + 200)
         assertEquals(MotionGate.Phase.MOVING, armed.phase)
 
         val second = felt().also { stamp(it, 360, 200, 8, 210) }
-        gate.onFrame(second, 800)
-        gate.onFrame(second, 860)
-        val shot = gate.onFrame(second, 860 + 300)
+        gate.onFrame(second, throwAt + 300)
+        gate.onFrame(second, throwAt + 360)
+        val shot = gate.onFrame(second, throwAt + 360 + 300)
         assertTrue(shot.shouldCapture)
     }
 
@@ -111,5 +113,116 @@ class MotionGateTest {
         assertFalse(info.diceInBox)
         gate.onFrame(edge, 80)
         assertFalse(gate.onFrame(edge, 80 + 200).shouldCapture)
+    }
+
+    @Test
+    fun diceAlreadyRestingLogWithoutAThrow() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 500)
+        gate.running = true
+        val resting = felt().also { stamp(it, w / 2, h / 2, 8, 230) }
+        val seen = gate.onFrame(resting, 0)
+        assertTrue(seen.diceInBox)
+        assertFalse(seen.shouldCapture)
+        assertEquals(MotionGate.Phase.SETTLING, seen.phase)
+        assertEquals(MotionGate.Stage.DICE_SEEN, seen.stage)
+
+        val settling = gate.onFrame(resting, 200)
+        assertEquals(MotionGate.Stage.SETTLING, settling.stage)
+        assertFalse(settling.shouldCapture)
+
+        val shot = gate.onFrame(resting, 500)
+        assertTrue("resting dice must be captured once they have been still", shot.shouldCapture)
+        assertEquals(MotionGate.Phase.HOLD, shot.phase)
+        assertEquals(MotionGate.Stage.CAPTURING, shot.stage)
+
+        assertFalse(gate.onFrame(resting, 900).shouldCapture)
+        assertFalse(gate.onFrame(resting, 2_000).shouldCapture)
+    }
+
+    @Test
+    fun placedDiceBelowTheMotionSpikeStillLog() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 400)
+        gate.running = true
+        assertFalse(gate.onFrame(felt(), 0).shouldCapture)
+
+        // 9x9 is enough to turn the box green, and too small to count as a throw.
+        val placed = felt().also { stamp(it, w / 2, h / 2, 4, 220) }
+        val seen = gate.onFrame(placed, 40)
+        assertTrue(seen.diceInBox)
+        assertFalse(seen.shouldCapture)
+        assertEquals(MotionGate.Phase.SETTLING, seen.phase)
+        assertEquals(MotionGate.Stage.DICE_SEEN, seen.stage)
+
+        assertFalse(gate.onFrame(placed, 40 + 399).shouldCapture)
+        val shot = gate.onFrame(placed, 40 + 400)
+        assertTrue(shot.shouldCapture)
+        assertEquals(MotionGate.Stage.CAPTURING, shot.stage)
+        assertFalse(gate.onFrame(placed, 2_000).shouldCapture)
+    }
+
+    @Test
+    fun removingTheDiceRearmsTheNextPlacement() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 300, rearmMs = 200)
+        gate.running = true
+        val first = felt().also { stamp(it, w / 2, h / 2, 8, 230) }
+        gate.onFrame(first, 0)
+        assertTrue(gate.onFrame(first, 300).shouldCapture)
+
+        val empty = felt()
+        val leaving = gate.onFrame(empty, 400)
+        assertFalse(leaving.diceInBox)
+        assertEquals(MotionGate.Phase.HOLD, leaving.phase)
+        val ready = gate.onFrame(empty, 400 + MotionGate.EMPTY_REARM_MS)
+        assertEquals(MotionGate.Phase.ARMED, ready.phase)
+        assertEquals(MotionGate.Stage.WAITING, ready.stage)
+
+        val second = felt().also { stamp(it, w / 2 + 40, h / 2, 8, 210) }
+        gate.onFrame(second, 700)
+        val still = gate.onFrame(second, 760)
+        assertEquals(MotionGate.Phase.SETTLING, still.phase)
+        val shot = gate.onFrame(second, 760 + 300)
+        assertTrue("a new placement after the box was empty must log", shot.shouldCapture)
+    }
+
+    @Test
+    fun aDifferentRestingArrangementLogsWithoutAnotherThrow() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 300, rearmMs = 500)
+        gate.running = true
+        val first = felt().also { stamp(it, 220, 170, 8, 230) }
+        gate.onFrame(first, 0)
+        assertTrue(gate.onFrame(first, 300).shouldCapture)
+
+        val quietEnd = 300 + MotionGate.POST_CAPTURE_QUIET_MS
+        assertFalse(gate.onFrame(first, quietEnd).shouldCapture)
+        val remembered = gate.onFrame(first, quietEnd + MotionGate.HOLD_REF_MS)
+        assertEquals(MotionGate.Phase.HOLD, remembered.phase)
+        assertFalse(remembered.shouldCapture)
+
+        val movedAt = quietEnd + MotionGate.HOLD_REF_MS + 40
+        val moved = felt().also { stamp(it, 420, 220, 8, 230) }
+        val bump = gate.onFrame(moved, movedAt)
+        assertFalse(bump.shouldCapture)
+        val changed = gate.onFrame(moved, movedAt + 40)
+        assertEquals(MotionGate.Phase.SETTLING, changed.phase)
+        assertTrue(changed.detail.contains("changed"))
+        val shot = gate.onFrame(moved, movedAt + 40 + 300)
+        assertTrue(shot.shouldCapture)
+        assertEquals(MotionGate.Stage.CAPTURING, shot.stage)
+    }
+
+    @Test
+    fun aFailedCaptureTriesAgainWhileTheDiceStayStill() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 300)
+        gate.running = true
+        val resting = felt().also { stamp(it, w / 2, h / 2, 8, 220) }
+        gate.onFrame(resting, 0)
+        assertTrue(gate.onFrame(resting, 300).shouldCapture)
+
+        gate.recheckSoon()
+        val retry = gate.onFrame(resting, 300)
+        assertFalse(retry.shouldCapture)
+        assertEquals(MotionGate.Phase.SETTLING, retry.phase)
+        val shot = gate.onFrame(resting, 600)
+        assertTrue(shot.shouldCapture)
     }
 }

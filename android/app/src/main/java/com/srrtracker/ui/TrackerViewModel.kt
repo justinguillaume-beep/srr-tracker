@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.srrtracker.data.AppDatabase
@@ -50,7 +51,8 @@ data class PendingCheck(
     val jpeg: ByteArray,
     val d1: Int?,
     val d2: Int?,
-    val detected: DiceDetector.Detection?
+    val detected: DiceDetector.Detection?,
+    val reason: String
 )
 
 data class SessionSummary(
@@ -85,7 +87,9 @@ data class UiState(
     val settleMs: Long = 500L,
     val soundOn: Boolean = false,
     val sessionName: String = "",
-    val cameraMessage: String? = null
+    val cameraMessage: String? = null,
+    val busy: Boolean = false,
+    val manualCapture: Boolean = false
 )
 
 sealed interface UiEffect {
@@ -142,57 +146,116 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     fun onFrame(info: MotionGate.FrameInfo) {
         val prev = lastInfo
         lastInfo = info
-        if (prev?.diceInBox == info.diceInBox && prev.phase == info.phase && _ui.value.cameraMessage == null) {
-            return
+        val changed = prev?.diceInBox != info.diceInBox || prev.phase != info.phase || prev.stage != info.stage
+        if (changed) {
+            Log.i(TAG, "gate ${info.stage} phase=${info.phase} dice=${info.diceInBox} capture=${info.shouldCapture} ${info.detail}")
         }
+        if (info.shouldCapture) {
+            _ui.update {
+                it.copy(diceInBox = info.diceInBox, status = "Capturing...", statusIsSeven = false, busy = true)
+            }
+        }
+        if (!changed && _ui.value.cameraMessage == null) return
         _ui.update { it.copy(diceInBox = info.diceInBox) }
-        if (counting.get() || _ui.value.pending != null) return
+        if (counting.get() || _ui.value.pending != null || _ui.value.busy) return
         if (flashJob?.isActive == true) return
         publishLiveStatus()
     }
 
+    fun countNow() {
+        val state = _ui.value
+        if (!state.running || state.pending != null || state.busy || counting.get()) return
+        Log.i(TAG, "count now")
+        _ui.update {
+            it.copy(status = "Capturing...", statusIsSeven = false, busy = true, manualCapture = true)
+        }
+    }
+
+    fun acknowledgeManualCapture() {
+        _ui.update { it.copy(manualCapture = false) }
+    }
+
     fun onCameraReady() {
         _ui.update { it.copy(cameraMessage = null) }
-        if (!counting.get() && _ui.value.pending == null && flashJob?.isActive != true) publishLiveStatus()
+        if (!counting.get() && _ui.value.pending == null && !_ui.value.busy && flashJob?.isActive != true) publishLiveStatus()
     }
 
     fun onCameraError(message: String) {
-        val plain = if (message.contains("camera", ignoreCase = true)) {
-            "Camera is blocked. Allow it in phone settings, then come back."
-        } else {
-            "Camera problem. Try again."
+        Log.e(TAG, "camera: $message")
+        counting.set(false)
+        val blocked = message.contains("did not start", ignoreCase = true) ||
+            message.contains("No camera", ignoreCase = true)
+        if (blocked) {
+            val plain = "Camera is blocked. Allow it in phone settings, then come back."
+            _ui.update { it.copy(cameraMessage = plain, status = plain, busy = false, manualCapture = false) }
+            return
         }
-        _ui.update { it.copy(cameraMessage = plain, status = plain) }
+        _ui.update { it.copy(busy = false, manualCapture = false, cameraMessage = null) }
+        showFlash("Could not read the dice. $message", false)
     }
 
     fun onCaptured(image: RgbImage, jpeg: ByteArray, roi: NormRect?) {
+        Log.i(TAG, "photo received ${image.width}x${image.height}")
         val state = _ui.value
-        if (!state.running || state.pending != null) return
-        if (!counting.compareAndSet(false, true)) return
+        if (!state.running || state.pending != null) {
+            Log.w(TAG, "photo dropped running=${state.running} pending=${state.pending != null}")
+            _ui.update { it.copy(busy = false) }
+            return
+        }
+        if (!counting.compareAndSet(false, true)) {
+            Log.w(TAG, "photo dropped, count already running")
+            return
+        }
         flashJob?.cancel()
-        _ui.update { it.copy(status = "Counting...", statusIsSeven = false) }
+        _ui.update { it.copy(status = "Counting...", statusIsSeven = false, busy = true) }
         viewModelScope.launch {
-            val det = try {
-                withContext(Dispatchers.Default) { DiceDetector.detectRoll(image, roi) }
-            } catch (_: Throwable) {
-                null
-            }
-            if (!_ui.value.running) {
-                counting.set(false)
-                publishLiveStatus()
-                return@launch
-            }
-            val solid = det != null && det.ok && det.confidence == "high" && det.d1 != null && det.d2 != null
-            if (solid) {
-                saveRoll(det!!.d1!!, det.d2!!, jpeg, det, userChanged = false)
-                counting.set(false)
-            } else {
+            var openedCheck = false
+            try {
+                val det = try {
+                    withContext(Dispatchers.Default) { DiceDetector.detectRoll(image, roi) }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "detect failed", t)
+                    null
+                }
+                Log.i(
+                    TAG,
+                    "detect ok=${det?.ok} conf=${det?.confidence} total=${det?.total} reason=${det?.reason} hint=${det?.hint}"
+                )
+                if (!_ui.value.running) {
+                    _ui.update { it.copy(busy = false) }
+                    publishLiveStatus()
+                    return@launch
+                }
+                val solid = det != null && det.ok && det.confidence == "high" && det.d1 != null && det.d2 != null
+                if (solid) {
+                    val saved = saveRoll(det!!.d1!!, det.d2!!, jpeg, det, userChanged = false)
+                    if (!saved) {
+                        showFlash("Could not read the dice. No session is open.", false)
+                    }
+                    _ui.update { it.copy(busy = false) }
+                } else {
+                    val reason = readFailureReason(det)
+                    openedCheck = true
+                    _ui.update {
+                        it.copy(
+                            status = "Could not read the dice. $reason",
+                            statusIsSeven = false,
+                            busy = false,
+                            pending = PendingCheck(jpeg, det?.d1, det?.d2, det, reason)
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "count failed", t)
                 _ui.update {
                     it.copy(
-                        status = if (det?.ok == true) "Check the dice" else "Enter both dice",
-                        pending = PendingCheck(jpeg, det?.d1, det?.d2, det)
+                        busy = false,
+                        status = "Could not read the dice. ${t.message ?: "Something went wrong."}",
+                        statusIsSeven = false
                     )
                 }
+            } finally {
+                if (!openedCheck) counting.set(false)
             }
         }
     }
@@ -239,7 +302,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update {
             it.copy(
                 running = running,
-                status = if (running) "Ready, waiting for roll" else "Paused",
+                status = if (running) "Waiting for dice" else "Paused",
                 statusIsSeven = false
             )
         }
@@ -251,7 +314,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 guideDone = true,
                 running = true,
-                status = "Ready, waiting for roll",
+                status = "Waiting for dice",
                 statusIsSeven = false
             )
         }
@@ -402,15 +465,22 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun readFailureReason(det: DiceDetector.Detection?): String {
+        if (det == null) return "The photo could not be read."
+        if (!det.ok) return det.reason ?: "No pips found."
+        if (det.hint.isNotBlank()) return det.hint
+        return "Not sure about this read."
+    }
+
     private suspend fun saveRoll(
         d1: Int,
         d2: Int,
         jpeg: ByteArray,
         det: DiceDetector.Detection?,
         userChanged: Boolean
-    ) {
+    ): Boolean {
         val sid = sessionId.value
-        if (sid <= 0) return
+        if (sid <= 0) return false
         val ts = System.currentTimeMillis()
         val path = withContext(Dispatchers.IO) { photos.save(jpeg, ts) }
         val total = d1 + d2
@@ -431,7 +501,9 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         )
         val state = _ui.value
         feedback.onLogged(total == 7, state.soundOn)
+        Log.i(TAG, "logged $total")
         showFlash("Logged $total", total == 7)
+        return true
     }
 
     private fun showFlash(text: String, seven: Boolean) {
@@ -452,9 +524,11 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         }
         val text = when {
             !state.running -> "Paused"
-            lastInfo?.phase == MotionGate.Phase.MOVING -> "Dice moving..."
-            lastInfo?.phase == MotionGate.Phase.SETTLING -> "Holding still..."
-            else -> "Ready, waiting for roll"
+            lastInfo?.stage == MotionGate.Stage.DICE_SEEN -> "Dice seen"
+            lastInfo?.stage == MotionGate.Stage.SETTLING -> "Holding still..."
+            lastInfo?.stage == MotionGate.Stage.CAPTURING -> "Capturing..."
+            lastInfo?.stage == MotionGate.Stage.HOLD -> "Waiting for the next roll"
+            else -> "Waiting for dice"
         }
         _ui.update { it.copy(status = text, statusIsSeven = false) }
     }
@@ -528,5 +602,6 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         private const val KEY_SENS = "sensitivity"
         private const val KEY_SETTLE = "settleMs"
         private const val KEY_SOUND = "sound"
+        private const val TAG = "SrrTracker"
     }
 }

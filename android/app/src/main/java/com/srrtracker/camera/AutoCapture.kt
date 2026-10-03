@@ -3,6 +3,7 @@ package com.srrtracker.camera
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.util.Rational
 import android.util.Size
 import androidx.camera.core.CameraSelector
@@ -26,6 +27,7 @@ import com.srrtracker.detect.RgbImage
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 import kotlin.math.min
 
@@ -46,7 +48,17 @@ class AutoCapture(
     private var provider: ProcessCameraProvider? = null
     private var imageCapture: ImageCapture? = null
     private val busy = AtomicBoolean(false)
+    private val force = AtomicBoolean(false)
+    private val captureGen = AtomicInteger(0)
+    private val activeGen = AtomicInteger(0)
+    private var busySince = 0L
     @Volatile private var stopped = false
+
+    /** Take a photo on the next frame even if the dice have not settled. */
+    fun requestCapture() {
+        force.set(true)
+        Log.i(TAG, "manual capture requested")
+    }
 
     fun start(previewView: PreviewView, lifecycleOwner: LifecycleOwner) {
         stopped = false
@@ -132,20 +144,52 @@ class AutoCapture(
     }
 
     private fun analyze(image: ImageProxy) {
+        var acquired = 0
         try {
             if (stopped) return
-            val gray = toMotionGray(image)
-            val info = gate.onFrame(gray, System.currentTimeMillis())
-            main.post { if (!stopped) onFrame(info) }
-            if (info.shouldCapture && busy.compareAndSet(false, true)) {
-                val roi = info.roi
-                val capture = imageCapture
-                if (capture == null) {
+            val now = System.currentTimeMillis()
+            if (busy.get() && activeGen.get() != 0 && now - busySince > CAPTURE_TIMEOUT_MS) {
+                val gen = activeGen.get()
+                if (gen != 0 && activeGen.compareAndSet(gen, 0)) {
                     busy.set(false)
-                    return
+                    gate.recheckSoon()
+                    Log.e(TAG, "capture timed out")
+                    main.post { if (!stopped) onError("The photo took too long.") }
                 }
+            }
+            val gray = toMotionGray(image)
+            val info = gate.onFrame(gray, now)
+            val manual = force.get()
+            main.post { if (!stopped) onFrame(info) }
+            if (!info.shouldCapture && !manual) return
+            if (!busy.compareAndSet(false, true)) {
+                Log.i(TAG, "capture waiting, camera still busy manual=$manual ${info.detail}")
+                return
+            }
+            acquired = captureGen.incrementAndGet()
+            activeGen.set(acquired)
+            busySince = now
+            force.set(false)
+            if (manual && !info.shouldCapture) gate.holdAfterManual()
+            val roi = info.roi
+            val capture = imageCapture
+            if (capture == null) {
+                finishCapture(acquired)
+                gate.recheckSoon()
+                Log.e(TAG, "capture requested but the camera is not ready")
+                main.post { if (!stopped) onError("Camera is not ready to take a photo.") }
+                return
+            }
+            Log.i(TAG, "taking photo manual=$manual present=${info.diceInBox} ${info.detail}")
+            val gen = acquired
+            try {
                 capture.takePicture(analysisExecutor, object : ImageCapture.OnImageCapturedCallback() {
                     override fun onCaptureSuccess(photo: ImageProxy) {
+                        if (!finishCapture(gen)) {
+                            photo.close()
+                            Log.w(TAG, "late photo ignored")
+                            return
+                        }
                         try {
                             val buffer = photo.planes[0].buffer
                             val bytes = ByteArray(buffer.remaining())
@@ -154,29 +198,48 @@ class AutoCapture(
                             val rgb = bitmap.toRgbImage()
                             val jpeg = downscaledJpeg(bitmap)
                             bitmap.recycle()
+                            Log.i(TAG, "photo decoded ${rgb.width}x${rgb.height}")
                             main.post {
                                 if (!stopped) onStill(rgb, jpeg, roi)
                             }
                         } catch (t: Throwable) {
+                            Log.e(TAG, "photo decode failed", t)
                             gate.recheckSoon()
-                            main.post { if (!stopped) onError(t.message ?: "Could not read the photo") }
+                            main.post { if (!stopped) onError(t.message ?: "Could not read the photo.") }
                         } finally {
                             photo.close()
-                            busy.set(false)
                         }
                     }
 
                     override fun onError(exception: ImageCaptureException) {
-                        busy.set(false)
+                        if (!finishCapture(gen)) return
+                        Log.e(TAG, "takePicture failed code=${exception.imageCaptureError}", exception)
                         gate.recheckSoon()
-                        main.post { if (!stopped) onError(exception.message ?: "Photo failed") }
+                        main.post { if (!stopped) onError(exception.message ?: "Photo failed.") }
                     }
                 })
+            } catch (t: Throwable) {
+                finishCapture(gen)
+                gate.recheckSoon()
+                Log.e(TAG, "takePicture threw", t)
+                main.post { if (!stopped) onError(t.message ?: "Photo failed.") }
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            Log.e(TAG, "frame analysis failed", t)
+            if (acquired != 0) {
+                finishCapture(acquired)
+                gate.recheckSoon()
+                main.post { if (!stopped) onError(t.message ?: "Camera frame failed.") }
+            }
         } finally {
             image.close()
         }
+    }
+
+    private fun finishCapture(gen: Int): Boolean {
+        if (!activeGen.compareAndSet(gen, 0)) return false
+        busy.set(false)
+        return true
     }
 
     private fun toMotionGray(image: ImageProxy): IntArray {
@@ -234,5 +297,10 @@ class AutoCapture(
             val best = pool.maxBy { it.width.toLong() * it.height }
             return listOf(best)
         }
+    }
+
+    companion object {
+        private const val TAG = "SrrTracker"
+        private const val CAPTURE_TIMEOUT_MS = 4_000L
     }
 }

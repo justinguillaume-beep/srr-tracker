@@ -261,9 +261,17 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
             )
         }
         Spacer(Modifier.height(8.dp))
+        BigButton(
+            "Count now",
+            { vm.countNow() },
+            Modifier.fillMaxWidth(),
+            primary = false,
+            enabled = state.running && !state.busy && state.pending == null
+        )
+        Spacer(Modifier.height(8.dp))
         if (state.rows.isEmpty()) {
             Text(
-                "No rolls yet. Tap Start, then throw the dice into the box.",
+                "No rolls yet. Put the dice in the box and hold still, or tap Count now.",
                 color = Muted,
                 fontSize = 18.sp,
                 modifier = Modifier.padding(top = 24.dp)
@@ -319,10 +327,15 @@ private fun CheckScreen(vm: TrackerViewModel, pending: PendingCheck) {
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text(
-            if (pending.detected?.ok == true) "Check the dice" else "Enter both dice",
+            if (pending.detected?.ok == true) "Check the dice" else "Could not read the dice",
             color = Ink, fontSize = 32.sp, fontWeight = FontWeight.Bold
         )
-        Text("Tap a number if it is wrong, then save.", color = Muted, fontSize = 18.sp)
+        Text(
+            pending.reason.ifBlank { "Tap a number if it is wrong, then save." },
+            color = Muted,
+            fontSize = 18.sp
+        )
+        Text("Tap a number if it is wrong, then save.", color = Muted, fontSize = 16.sp)
         photo?.let {
             Image(
                 it.asImageBitmap(),
@@ -524,6 +537,12 @@ private fun CameraPane(vm: TrackerViewModel, running: Boolean, modifier: Modifie
         capture.gate.settleMs = state.settleMs
         capture.gate.running = running
     }
+    LaunchedEffect(state.manualCapture) {
+        if (state.manualCapture) {
+            capture.requestCapture()
+            vm.acknowledgeManualCapture()
+        }
+    }
     DisposableEffect(capture) {
         onDispose { capture.stop() }
     }
@@ -624,7 +643,7 @@ private fun BigButton(
 private fun statusColor(state: UiState): Color = when {
     state.statusIsSeven -> Seven
     state.status.startsWith("Logged") -> Good
-    state.status.startsWith("Enter") || state.status.startsWith("Check") || state.status.startsWith("Camera") -> Color(0xFFFFC107)
+    state.status.startsWith("Could not") || state.status.startsWith("Check") || state.status.startsWith("Camera") -> Color(0xFFFFC107)
     else -> Ink
 }
 

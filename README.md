@@ -14,15 +14,15 @@ Each push to `main` builds a debug APK and publishes it on the `latest` release.
 2. If Android blocks the download, allow it: **Settings → Security** (or **Apps → Special app access**) → **Install unknown apps** → turn it on for Chrome (or Files).
 3. Open `srr-tracker-debug.apk` and tap Install.
 4. Open **SRR Tracker**. Allow the camera. Follow the three setup screens: the phone lies face-down, and the dice should sit inside the box on screen.
-5. Tap **Start**. Throw the dice into the box. When they sit still for about half a second the app says **Counting...**, then **Logged 7** (or whatever the total is) and beeps. Sevens in the list are red.
-6. If it is not sure, it asks you to tap the two dice. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it.
+5. Tap **Start**. Put the dice in the box, or throw them. The box turns green when it sees them. The status line then says **Dice seen**, **Holding still...**, **Capturing...**, **Counting...**, and **Logged 7** (or whatever the total is). Dice that are already sitting in the box are counted too. You do not have to throw them first. Sevens in the list are red.
+6. If it cannot read the pips, it opens a check screen and tells you why. Tap the two numbers and save. **Count now** takes a photo immediately. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it.
 7. Menu: new session, past sessions, save spreadsheet (also copied to Downloads), settings (how easily a throw is noticed, how long the dice must sit still, and a **Beep on each roll** switch that starts off). There is no vibration.
 
 The APK is a debug build signed with the debug key. Updating means downloading that same link again (the `latest` release is replaced on every push to main).
 
 ### What the Android app does
 
-The back camera stays on. It watches for motion inside the box, waits until the dice have been still (default 0.5 s), then takes the sharpest practical photo (up to 4K). Small dice are found, cropped, and enlarged before the pips are counted, so a die only about 40–80 pixels wide in a 1080p frame can still be read. A clear read is saved on its own and the status line says what was logged. A doubtful read waits for you to tap the numbers. Every roll stores a smaller JPEG on the phone, with the time. The beep is off until you turn on **Beep on each roll** in Settings. The phone does not vibrate.
+The back camera stays on. When dice are in the box and have been still (default 0.5 s), it takes the sharpest practical photo (up to 4K). A throw works, and so does setting the dice down or leaving them already resting in the box. After a roll it waits until the dice leave, a new throw lands, or the dice that are sitting there have clearly changed. **Count now** takes a photo if you do not want to wait. Small dice are found, cropped, and enlarged before the pips are counted, so a die only about 40–80 pixels wide in a 1080p frame can still be read. A clear read is saved on its own and the status line says what was logged. A doubtful or failed read opens the check screen and says why. Every roll stores a smaller JPEG on the phone, with the time. The beep is off until you turn on **Beep on each roll** in Settings. The phone does not vibrate.
 
 SRR is rolls per seven, shown as `1:6.0`. A fair pair of dice is `1:6.0`. The percent under it is how often a 7 showed up.
 
@@ -36,7 +36,7 @@ cd android
 ./gradlew testDebugUnitTest
 ```
 
-The APK is `android/app/build/outputs/apk/debug/app-debug.apk`. Unit tests cover the SRR math, the motion gate (including a small die), and pip counting.
+The APK is `android/app/build/outputs/apk/debug/app-debug.apk`. Unit tests cover the SRR math, the motion gate (a throw, dice already resting, dice placed without a motion spike, a new placement after the box is empty, and a changed arrangement), and pip counting.
 
 On 18 synthetic photos at 1920×1080, with die sides of 40, 45, 50, 55, 60, 70, 80, and 90 px (white dice with dark pips and red dice with light pips, a few with a lighting gradient, one pair almost touching), the Android counter got **18/18 totals right and 18/18 faces exact**, all at high confidence. That includes every 40 px case (1+1, 1+6, 2+5, 3+4, 6+6, and a red 2+2). These are clean drawings, not photos of real casino dice.
 
