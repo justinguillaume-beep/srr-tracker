@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0b0d">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SRR">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+<title>SRR Tracker</title>
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <div class="stat"><div class="big" id="rollCount">0</div><div class="lbl">rolls</div></div>
+    <div class="stat mid"><div class="big" id="srr">&mdash;</div><div class="lbl" id="srrSub">SRR</div></div>
+    <button id="menuBtn" class="icon-btn" aria-label="Menu">&#8943;</button>
+  </header>
+
+  <section class="cam" id="cam">
+    <video id="video" playsinline muted autoplay></video>
+    <div class="reticle"></div>
+    <div class="cam-msg" id="camMsg">
+      <div id="camText">Camera is off</div>
+      <button id="startCam" class="btn">Start camera</button>
+    </div>
+  </section>
+
+  <main id="list" aria-label="Rolls"></main>
+
+  <footer class="bottom">
+    <button id="capture" class="capture">CAPTURE ROLL</button>
+  </footer>
+</div>
+
+<!-- Review sheet (after capture) -->
+<div class="sheet" id="reviewSheet" hidden>
+  <div class="panel">
+    <div class="photo-wrap"><canvas id="reviewCanvas"></canvas></div>
+    <div class="detect-line" id="detectLine"></div>
+    <div class="pickers">
+      <div class="picker" data-die="0"></div>
+      <div class="picker" data-die="1"></div>
+    </div>
+    <div class="total-line"><span id="reviewTotal">?</span></div>
+    <div class="auto-bar" id="autoBar" hidden><div></div></div>
+    <div class="row">
+      <button class="btn ghost" id="reviewDiscard">Discard</button>
+      <button class="btn primary" id="reviewLog">Log roll</button>
+    </div>
+  </div>
+</div>
+
+<!-- Detail sheet (tap list item) -->
+<div class="sheet" id="detailSheet" hidden>
+  <div class="panel">
+    <div class="detail-head"><span id="detailTitle"></span><button class="icon-btn" id="detailClose" aria-label="Close">&times;</button></div>
+    <div class="photo-wrap"><canvas id="detailCanvas"></canvas><div id="noPhoto" class="no-photo" hidden>No photo (manual entry)</div></div>
+    <div class="pickers">
+      <div class="picker" data-die="0"></div>
+      <div class="picker" data-die="1"></div>
+    </div>
+    <div class="total-line"><span id="detailTotal">?</span></div>
+    <div class="row">
+      <button class="btn danger" id="detailDelete">Delete roll</button>
+      <button class="btn primary" id="detailDone">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Menu -->
+<div class="sheet" id="menuSheet" hidden>
+  <div class="panel menu">
+    <div class="menu-title" id="sessionName"></div>
+    <button class="btn wide" id="mNew">New session</button>
+    <button class="btn wide" id="mSessions">All sessions</button>
+    <button class="btn wide" id="mManual">Add roll manually (no photo)</button>
+    <button class="btn wide" id="mExport">Export CSV &mdash; this session</button>
+    <button class="btn wide" id="mExportAll">Export CSV &mdash; all sessions</button>
+    <button class="btn wide" id="mSettings">Settings</button>
+    <button class="btn wide danger" id="mReset">Reset this session (delete its rolls)</button>
+    <button class="btn wide ghost" id="mClose">Close</button>
+  </div>
+</div>
+
+<!-- Sessions -->
+<div class="sheet" id="sessionsSheet" hidden>
+  <div class="panel menu">
+    <div class="menu-title">Sessions</div>
+    <div id="sessionList"></div>
+    <button class="btn wide ghost" id="sClose">Close</button>
+  </div>
+</div>
+
+<!-- Settings -->
+<div class="sheet" id="settingsSheet" hidden>
+  <div class="panel menu">
+    <div class="menu-title">Settings</div>
+    <label class="setting"><input type="checkbox" id="setAuto"> Auto-accept detected roll if untouched</label>
+    <label class="setting">Auto-accept delay (seconds)
+      <input type="number" id="setDelay" min="1" max="10" step="0.5"></label>
+    <label class="setting"><input type="checkbox" id="setHigh"> Only auto-accept high-confidence detections</label>
+    <label class="setting"><input type="checkbox" id="setVibrate"> Vibrate on log</label>
+    <div class="note">Detection runs on your phone; nothing is uploaded. Always glance at the total &mdash; the pip counter is not perfect.</div>
+    <button class="btn wide primary" id="setClose">Done</button>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="stats.js"></script>
+<script src="detector.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
