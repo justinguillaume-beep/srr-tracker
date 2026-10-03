@@ -1,4 +1,52 @@
-# SRR Tracker (dice-control practice PWA)
+# SRR Tracker
+
+Two apps, same job: watch a pair of dice and keep the sevens-to-rolls ratio (SRR).
+
+- **Android app** in `android/` — phone sits face-down over the table and logs each throw by itself. This is the one to install.
+- **Web app** at the repo root — the original browser version. It is unchanged.
+
+## Install the Android app
+
+Each push to `main` builds a debug APK and publishes it on the `latest` release.
+
+1. On the phone, open this link in Chrome:
+   `https://github.com/justinguillaume-beep/srr-tracker/releases/download/latest/srr-tracker-debug.apk`
+2. If Android blocks the download, allow it: **Settings → Security** (or **Apps → Special app access**) → **Install unknown apps** → turn it on for Chrome (or Files).
+3. Open `srr-tracker-debug.apk` and tap Install.
+4. Open **SRR Tracker**. Allow the camera. Follow the three setup screens: the phone lies face-down, and the dice should sit inside the box on screen.
+5. Tap **Start**. Throw the dice into the box. When they sit still for about half a second the app says **Counting...**, then **Logged 7** (or whatever the total is) and beeps. Sevens in the list are red.
+6. If it is not sure, it asks you to tap the two dice. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it.
+7. Menu: new session, past sessions, save spreadsheet (also copied to Downloads), settings (how easily a throw is noticed, how long the dice must sit still, sound, vibration).
+
+The APK is a debug build signed with the debug key. Updating means downloading that same link again (the `latest` release is replaced on every push to main).
+
+### What the Android app does
+
+The back camera stays on. It watches for motion inside the box, waits until the dice have been still (default 0.5 s), then takes the sharpest practical photo (up to 4K). Small dice are found, cropped, and enlarged before the pips are counted, so a die only about 40–80 pixels wide in a 1080p frame can still be read. A clear read is saved on its own. A doubtful read waits for you to tap the numbers. Every roll stores a smaller JPEG on the phone, with the time.
+
+SRR is rolls per seven, shown as `1:6.0`. A fair pair of dice is `1:6.0`. The percent under it is how often a 7 showed up.
+
+### Build it yourself
+
+You need a JDK 17 and the Android SDK.
+
+```bash
+cd android
+./gradlew assembleDebug
+./gradlew testDebugUnitTest
+```
+
+The APK is `android/app/build/outputs/apk/debug/app-debug.apk`. Unit tests cover the SRR math, the motion gate (including a small die), and pip counting.
+
+On 18 synthetic photos at 1920×1080, with die sides of 40, 45, 50, 55, 60, 70, 80, and 90 px (white dice with dark pips and red dice with light pips, a few with a lighting gradient, one pair almost touching), the Android counter got **18/18 totals right and 18/18 faces exact**, all at high confidence. That includes every 40 px case (1+1, 1+6, 2+5, 3+4, 6+6, and a red 2+2). These are clean drawings, not photos of real casino dice.
+
+### Limits
+
+Pip counting is the same classical method as the web app (top-hat blobs + a 1–6 template), plus a crop-and-enlarge step for small dice. It is best with the phone straight down, decent light, and dice that stand out from the felt (white or red on green). Heavy glare, translucent casino dice, and dice outside the box are the cases it misses; those should land on the check screen instead of being saved as a guess. The app was compiled and unit-tested here; it has not been run on a physical phone in this environment. Nothing is uploaded.
+
+---
+
+# Web app (PWA)
 
 Plain HTML/CSS/JS, no build step, no dependencies, fully offline after first load.
 
