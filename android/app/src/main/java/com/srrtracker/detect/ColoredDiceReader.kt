@@ -1,8 +1,10 @@
 package com.srrtracker.detect
 
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /**
  * Finds small translucent purple and amber dice with white pips on a grey cloth.
@@ -23,7 +25,7 @@ object ColoredDiceReader {
         }
         val located = locate(work).map { box ->
             box.copy(x = box.x + bounds.x, y = box.y + bounds.y)
-        }
+        }.sortedWith(compareBy({ it.y }, { it.x }))
         val reads = located.map { countWhitePips(image, it) }
         val marks = reads.map { it.mark }
         val ms = (System.nanoTime() - t0) / 1_000_000
@@ -67,15 +69,27 @@ object ColoredDiceReader {
                 for (p in reads[order[di]].pips) pips.add(p.copy(die = di))
             }
         }
-        // These translucent faces still produce extra bright spots, so a pair is
-        // not saved on its own. The guess is kept for the check screen.
+        val margin = reads.minOf { it.margin }
+        if (trusted) {
+            return DiceDetector.Detection(
+                ok = true,
+                total = c0 + c1,
+                counts = guessed,
+                confidence = "high",
+                cost = null,
+                margin = margin.toDouble(),
+                pips = pips,
+                ms = ms,
+                dice = listOf(marks[order[0]], marks[order[1]])
+            )
+        }
         return DiceDetector.Detection(
             ok = false,
             total = null,
             counts = if (c0 in 1..6 && c1 in 1..6) guessed else null,
             confidence = "none",
             cost = null,
-            margin = null,
+            margin = margin.toDouble(),
             pips = pips,
             reason = when {
                 c0 !in 1..6 || c1 !in 1..6 -> "pip count ${if (c0 !in 1..6) c0 else c1} invalid"
@@ -104,6 +118,7 @@ object ColoredDiceReader {
     private class PipRead(
         val count: Int,
         val clear: Boolean,
+        val margin: Float,
         val mark: DiceDetector.DieMark,
         val pips: List<DiceDetector.PipMark>
     )
@@ -293,111 +308,247 @@ object ColoredDiceReader {
     }
 
     /**
-     * White pips are bright, low-chroma spots. A count is trusted only when
-     * those spots are clearly stronger than the next brightest wrinkles.
+     * White pips are compact blobs of similar size on the top face. Specular
+     * streaks and the bright bevel are longer, smaller, or pressed against the
+     * rim, so they are not pips. A lone glare spot is not logged as a 1.
      */
     private fun countWhitePips(image: RgbImage, die: Box): PipRead {
         val crop = ImageOps.crop(image, die.x, die.y, die.w, die.h)
-        val w = crop.width
-        val h = crop.height
-        val n = w * h
-        val white = FloatArray(n)
-        val lum = FloatArray(n)
-        for (i in 0 until n) {
-            val r = crop.red(i).toFloat()
-            val g = crop.green(i).toFloat()
-            val b = crop.blue(i).toFloat()
-            val mx = max(r, max(g, b))
-            val mn = min(r, min(g, b))
-            lum[i] = 0.30f * r + 0.59f * g + 0.11f * b
-            white[i] = lum[i] - 0.75f * (mx - mn)
-        }
-        val side = min(w, h).coerceAtLeast(8)
-        val win = max(4, (side * 0.18f).toInt())
-        val margin = max(2, (side * 0.08f).toInt())
-        val pipR = max(2, (side * 0.07f).toInt())
-        val peaks = ArrayList<Peak>()
-        for (y in margin until h - margin) {
-            for (x in margin until w - margin) {
-                val v = white[y * w + x]
-                if (!isLocalMax(white, w, h, x, y, win, v)) continue
-                val score = contrast(lum, w, h, x, y, pipR)
-                if (score > 8f) peaks += Peak(score, x, y)
-            }
-        }
-        peaks.sortByDescending { it.score }
-        val top = peaks.firstOrNull()?.score ?: 0f
-        val thr = max(16f, top * 0.40f)
-        val kept = peaks.filter { it.score >= thr }.take(8)
-        val count = kept.size
-        val strongest = kept.firstOrNull()?.score ?: 0f
-        val weakest = kept.lastOrNull()?.score ?: 0f
-        val next = peaks.getOrNull(kept.size)?.score ?: 0f
-        val clear = count in 1..6 &&
-            weakest >= strongest * 0.62f &&
-            next <= weakest * 0.50f
-        val pips = kept.map { p ->
-            DiceDetector.PipMark(
-                x = (die.x + p.x + 0.5) / image.width,
-                y = (die.y + p.y + 0.5) / image.height,
-                r = (side * 0.08) / max(image.width, image.height),
+        val face = topFace(crop)
+        val read = readBlobs(face)
+        val pips = ArrayList<DiceDetector.PipMark>()
+        for ((nx, ny) in read.points) {
+            pips += DiceDetector.PipMark(
+                x = ((die.x + nx * die.w) / image.width).toDouble(),
+                y = ((die.y + ny * die.h) / image.height).toDouble(),
+                r = ((min(die.w, die.h) * 0.08f) / max(image.width, image.height)).toDouble(),
                 die = 0
             )
         }
         return PipRead(
-            count = count,
-            clear = clear && count in 1..6,
-            mark = DiceDetector.DieMark(die.x, die.y, die.w, die.h, count),
+            count = read.count,
+            clear = read.clear,
+            margin = read.margin,
+            mark = DiceDetector.DieMark(die.x, die.y, die.w, die.h, read.count),
             pips = pips
         )
     }
 
-    private class Peak(val score: Float, val x: Int, val y: Int)
-
-    private fun isLocalMax(src: FloatArray, w: Int, h: Int, x: Int, y: Int, rad: Int, v: Float): Boolean {
-        val y0 = max(0, y - rad)
-        val y1 = min(h - 1, y + rad)
-        val x0 = max(0, x - rad)
-        val x1 = min(w - 1, x + rad)
-        for (yy in y0..y1) {
-            val row = yy * w
-            for (xx in x0..x1) {
-                val other = src[row + xx]
-                if (other > v) return false
-                if (other == v && (yy < y || (yy == y && xx < x))) return false
+    /** A tall or wide box includes a side face. Keep the square that holds the white pips. */
+    private fun topFace(crop: RgbImage): RgbImage {
+        val side = min(crop.width, crop.height)
+        if (crop.height > crop.width * 1.15f) {
+            var bestY = 0
+            var best = -1
+            val step = max(1, side / 12)
+            var y0 = 0
+            while (y0 + side <= crop.height) {
+                val score = brightCount(crop, 0, y0, side, side)
+                if (score > best) {
+                    best = score
+                    bestY = y0
+                }
+                y0 += step
             }
+            return ImageOps.crop(crop, 0, bestY, side, side)
         }
-        return true
+        if (crop.width > crop.height * 1.15f) {
+            var bestX = 0
+            var best = -1
+            val step = max(1, side / 12)
+            var x0 = 0
+            while (x0 + side <= crop.width) {
+                val score = brightCount(crop, x0, 0, side, side)
+                if (score > best) {
+                    best = score
+                    bestX = x0
+                }
+                x0 += step
+            }
+            return ImageOps.crop(crop, bestX, 0, side, side)
+        }
+        return crop
     }
 
-    private fun contrast(lum: FloatArray, w: Int, h: Int, cx: Int, cy: Int, rad: Int): Float {
-        var disk = 0.0
-        var dn = 0
-        var ring = 0.0
-        var rn = 0
-        val r2 = rad * rad
-        val outer = (rad * 1.7f).toInt().coerceAtLeast(rad + 1)
-        val o2 = outer * outer
-        val y0 = max(0, cy - outer)
-        val y1 = min(h - 1, cy + outer)
-        val x0 = max(0, cx - outer)
-        val x1 = min(w - 1, cx + outer)
-        for (y in y0..y1) {
-            val row = y * w
-            val dy = y - cy
-            for (x in x0..x1) {
-                val d = (x - cx) * (x - cx) + dy * dy
-                val v = lum[row + x].toDouble()
-                if (d <= r2) {
-                    disk += v
-                    dn++
-                } else if (d <= o2) {
-                    ring += v
-                    rn++
-                }
+    private fun brightCount(image: RgbImage, x: Int, y: Int, w: Int, h: Int): Int {
+        var n = 0
+        val x1 = min(image.width, x + w)
+        val y1 = min(image.height, y + h)
+        for (yy in y until y1) {
+            val row = yy * image.width
+            for (xx in x until x1) {
+                val i = row + xx
+                val mn = min(image.red(i), min(image.green(i), image.blue(i)))
+                if (mn >= 210) n++
             }
         }
-        if (dn == 0 || rn == 0) return 0f
-        return (disk / dn - ring / rn).toFloat()
+        return n
+    }
+
+    private class Blob(val area: Int, val nx: Float, val ny: Float, val aspect: Float, val fill: Float)
+
+    private class BlobFace(
+        val count: Int,
+        val clear: Boolean,
+        val margin: Float,
+        val points: List<Pair<Float, Float>>
+    )
+
+    private fun readBlobs(face: RgbImage): BlobFace {
+        var bestScore = -1e9f
+        var best = BlobFace(0, false, 0f, emptyList())
+        for (thr in intArrayOf(208, 222, 236)) {
+            val blobs = whiteBlobs(face, thr)
+            if (blobs.isEmpty()) continue
+            val big = blobs.maxOf { it.area }.coerceAtLeast(1)
+            val kept = blobs.filter { it.area >= 0.42f * big && it.aspect in 0.42f..2.4f && it.fill >= 0.42f }
+            val count = geometry(kept)
+            val ratio = if (kept.isEmpty()) 9f else kept.maxOf { it.area }.toFloat() / kept.minOf { it.area }.coerceAtLeast(1)
+            val inset = kept.isNotEmpty() && kept.all { it.nx in 0.12f..0.86f && it.ny in 0.12f..0.86f }
+            val low = whiteBlobs(face, thr - 22).map { it.area }.sortedDescending()
+            val runner = if (low.size >= 2) low[1].toFloat() / low[0].coerceAtLeast(1) else 0f
+            val oneOk = if (count == 1 && kept.isNotEmpty()) {
+                val p = kept[0]
+                abs(p.nx - 0.5f) <= 0.12f && abs(p.ny - 0.5f) <= 0.12f && runner <= 0.20f
+            } else {
+                true
+            }
+            val clear = count in 1..6 && ratio <= 1.28f && inset && (count != 1 || oneOk)
+            val score = (if (count in 1..6) 80f else 0f) + (if (clear) 30f else 0f) + thr / 10f - ratio * 8f
+            if (score > bestScore) {
+                bestScore = score
+                best = BlobFace(count, clear, if (clear) (1f / ratio) else 0f, kept.map { it.nx to it.ny })
+            }
+        }
+        return best
+    }
+
+    private fun whiteBlobs(face: RgbImage, thr: Int): List<Blob> {
+        val w = face.width
+        val h = face.height
+        val mask = BooleanArray(w * h)
+        for (i in mask.indices) {
+            val r = face.red(i)
+            val g = face.green(i)
+            val b = face.blue(i)
+            val mn = min(r, min(g, b))
+            val mx = max(r, max(g, b))
+            mask[i] = mn >= thr && mx - mn < 78
+        }
+        val opened = dilate(erode(mask, w, h), w, h)
+        val minArea = max(16, (0.003f * w * h).toInt())
+        val seen = BooleanArray(opened.size)
+        val stack = IntArray(opened.size)
+        val out = ArrayList<Blob>()
+        for (start in opened.indices) {
+            if (!opened[start] || seen[start]) continue
+            var sp = 0
+            stack[sp++] = start
+            seen[start] = true
+            var area = 0
+            var sumX = 0
+            var sumY = 0
+            var minX = w
+            var minY = h
+            var maxX = 0
+            var maxY = 0
+            while (sp > 0) {
+                val i = stack[--sp]
+                val x = i % w
+                val y = i / w
+                area++
+                sumX += x
+                sumY += y
+                if (x < minX) minX = x
+                if (y < minY) minY = y
+                if (x > maxX) maxX = x
+                if (y > maxY) maxY = y
+                for (dy in -1..1) {
+                    val yy = y + dy
+                    if (yy !in 0 until h) continue
+                    val row = yy * w
+                    for (dx in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val xx = x + dx
+                        if (xx !in 0 until w) continue
+                        val j = row + xx
+                        if (seen[j] || !opened[j]) continue
+                        seen[j] = true
+                        stack[sp++] = j
+                    }
+                }
+            }
+            if (area < minArea) continue
+            val bw = maxX - minX + 1
+            val bh = maxY - minY + 1
+            out += Blob(
+                area = area,
+                nx = sumX.toFloat() / area / w,
+                ny = sumY.toFloat() / area / h,
+                aspect = bw.toFloat() / bh,
+                fill = area.toFloat() / (bw * bh)
+            )
+        }
+        return out
+    }
+
+    /** Snap blob centers to a legal 1–6 layout. Anything else is not a face. */
+    private fun geometry(blobs: List<Blob>): Int {
+        val n = blobs.size
+        if (n == 1) {
+            val p = blobs[0]
+            return if (p.nx in 0.28f..0.72f && p.ny in 0.22f..0.78f) 1 else 0
+        }
+        if (n == 2) {
+            val d = hypot(blobs[0], blobs[1])
+            return if (d in 0.28f..0.95f) 2 else 0
+        }
+        if (n == 3) {
+            for (i in 0 until 3) {
+                val a = blobs[(i + 1) % 3]
+                val b = blobs[(i + 2) % 3]
+                val mx = (a.nx + b.nx) / 2f
+                val my = (a.ny + b.ny) / 2f
+                val dx = blobs[i].nx - mx
+                val dy = blobs[i].ny - my
+                if (sqrt(dx * dx + dy * dy) <= 0.18f) return 3
+            }
+            return 0
+        }
+        if (n == 4) {
+            val cx = blobs.sumOf { it.nx.toDouble() }.toFloat() / 4f
+            val cy = blobs.sumOf { it.ny.toDouble() }.toFloat() / 4f
+            val ds = blobs.map { d ->
+                val dx = d.nx - cx
+                val dy = d.ny - cy
+                sqrt(dx * dx + dy * dy)
+            }.sorted()
+            return if (ds[0] >= 0.12f && ds[3] - ds[0] <= 0.20f) 4 else 0
+        }
+        if (n == 5) {
+            val cx = blobs.sumOf { it.nx.toDouble() }.toFloat() / 5f
+            val cy = blobs.sumOf { it.ny.toDouble() }.toFloat() / 5f
+            val ds = blobs.map { d ->
+                val dx = d.nx - cx
+                val dy = d.ny - cy
+                sqrt(dx * dx + dy * dy)
+            }.sorted()
+            return if (ds[0] <= 0.14f && ds[1] >= 0.14f) 5 else 0
+        }
+        if (n == 6) {
+            val xs = blobs.map { it.nx }.sorted()
+            val ys = blobs.map { it.ny }.sorted()
+            if (grouped(xs) || grouped(ys)) return 6
+        }
+        return 0
+    }
+
+    private fun grouped(v: List<Float>): Boolean =
+        v[2] - v[0] <= 0.28f && v[5] - v[3] <= 0.28f && v[3] - v[2] >= 0.08f
+
+    private fun hypot(a: Blob, b: Blob): Float {
+        val dx = a.nx - b.nx
+        val dy = a.ny - b.ny
+        return sqrt(dx * dx + dy * dy)
     }
 }

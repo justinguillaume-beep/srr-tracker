@@ -16,7 +16,7 @@ Each push to `main` builds a debug APK and publishes it on the `latest` release.
 4. Open **SRR Tracker**. Allow the camera. Follow the three setup screens: the phone lies face-down, and the dice should sit inside the box on screen.
 5. Tap **Start**. Put the dice in the box, or throw them. The box turns green when it sees them. The status line then says **Dice seen**, **Holding still...**, **Capturing...**, **Counting...**, and **Logged 7** (or whatever the total is). Dice that are already sitting in the box are counted too. You do not have to throw them first. Sevens in the list are red.
 6. If it cannot read the pips, it opens a check screen and tells you why. Tap the two numbers and save. **Count now** takes a photo immediately. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it. A roll the camera could not read stays in the list as **unread** so you can tap it and enter the dice.
-7. Drag the box onto the two dice you are throwing, and drag a corner to resize it. The camera only looks inside that box. If more than two dice are inside it, the status says how many it found instead of logging a guess. Settings has **Reset box**, **Beep on each roll** (off at first), and **Save a marked photo**. There is no vibration.
+7. Drag the box onto the two dice you are throwing, and drag a corner to resize it. The camera only looks inside that box. If more than two dice are inside it, the status says how many it found instead of logging a guess. Settings has **Reset box**, **Beep on each roll** (off at first), **Save a marked photo**, and **Save each die crop**. There is no vibration.
 
 The APK is a debug build signed with the keystore in `android/app/debug.keystore`, the same key on every build. Each GitHub build gets a higher `versionCode` (the workflow run number), so a newer download can replace the installed app. `minSdk` is 26 and the APK includes arm64-v8a, armeabi-v7a, x86, and x86_64. Updating means downloading that same link again (the `latest` release is replaced on every push to main).
 
@@ -42,7 +42,16 @@ On 18 synthetic photos at 1920×1080, with die sides of 40, 45, 50, 55, 60, 70, 
 
 ### Limits
 
-Justin's dice are small translucent purple dice and one amber die, with white pips, on grey cloth. Teal foam and the clutter beside the cloth are not counted as dice. Drag the box so only the two dice in use sit inside it. If the box holds more than two, the status says how many were found and nothing is logged as a pair. The pip faces on these translucent dice are not reliable enough to save on their own, so the roll stays unread and the check screen opens. The four table photos are in the unit tests. The app has not been run on a physical phone in this environment. Nothing is uploaded.
+Justin's dice are small translucent purple dice and one amber die, with white pips, on grey cloth. Teal foam and the clutter beside the cloth are not counted as dice. Drag the box so only the two dice in use sit inside it. If the box holds more than two, the status says how many were found and nothing is logged as a pair.
+
+White pips are counted as round blobs of similar size inside the top face. A read is saved on its own only when both dice match a legal face and the blobs are inset, even in size, and not a lone glare spot. On the four table photos that means:
+
+- `0f574bd7…` reads **2 and 1** and is logged.
+- `156f4bdb…` is Justin's **6 and 6**, but the saturated pixels are one or two blobs, so the guess stays unread.
+- `3643033e…` finds all six dice. The amber die reads **6**. The other faces are not reliable enough to log, including when the box is tightened around two of them.
+- `0cb28426…` finds all four dice. The amber die's bright edge is still counted with the pips, so that face is not logged.
+
+**Save each die crop** (on by default) stores a JPEG of every die next to the roll, so a wrong face can be sent back. The four table photos are in the unit tests. The app has not been run on a physical phone in this environment. Nothing is uploaded.
 
 ---
 

@@ -33,6 +33,9 @@ class RealDicePhotoTest {
             val faces = det.dice.joinToString(",") { it.count.toString() }
             println("$name dice=${det.dice.size} ok=${det.ok} reason=${det.reason} faces=$faces counts=${det.counts}")
             assertEquals(name, n, det.dice.size)
+            if (name.startsWith("3643033e")) {
+                assertTrue("amber die should read 6, faces=$faces", det.dice.any { it.count == 6 })
+            }
             if (n == 2) {
                 assertEquals(name, 2, det.dice.size)
             } else {

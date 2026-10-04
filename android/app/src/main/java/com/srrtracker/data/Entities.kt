@@ -39,5 +39,6 @@ data class RollEntity(
     val pipsJson: String?,
     val unread: Boolean = false,
     val readReason: String? = null,
-    val debugPath: String? = null
+    val debugPath: String? = null,
+    val cropPaths: String? = null
 )

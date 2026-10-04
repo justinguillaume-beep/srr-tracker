@@ -496,6 +496,10 @@ private fun SettingsDialog(vm: TrackerViewModel, state: UiState) {
                 Text("Save a marked photo", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
                 Switch(checked = state.markPhotos, onCheckedChange = { vm.setMarkPhotos(it) })
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Save each die crop", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                Switch(checked = state.saveDieCrops, onCheckedChange = { vm.setSaveDieCrops(it) })
+            }
             Text("Drag the box onto the two dice. Drag a corner to resize it.", color = Muted, fontSize = 16.sp)
             BigButton("Reset box", { vm.resetFrame() }, Modifier.fillMaxWidth(), primary = false)
             BigButton("Done", { vm.closeSettings() }, Modifier.fillMaxWidth())

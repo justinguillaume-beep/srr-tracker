@@ -16,6 +16,7 @@ import com.srrtracker.data.Session
 import com.srrtracker.detect.DebugMarks
 import com.srrtracker.detect.DiceDetector
 import com.srrtracker.detect.FrameTarget
+import com.srrtracker.detect.ImageOps
 import com.srrtracker.detect.MotionGate
 import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.RgbImage
@@ -35,6 +36,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.max
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -93,6 +95,7 @@ data class UiState(
     val settleMs: Long = 500L,
     val soundOn: Boolean = false,
     val markPhotos: Boolean = true,
+    val saveDieCrops: Boolean = true,
     val sessionName: String = "",
     val cameraMessage: String? = null,
     val busy: Boolean = false,
@@ -129,6 +132,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         val settle = prefs.getLong(KEY_SETTLE, 500L)
         val sound = prefs.getBoolean(KEY_SOUND, false)
         val mark = prefs.getBoolean(KEY_MARK, true)
+        val crops = prefs.getBoolean(KEY_CROPS, true)
         val frame = NormRect(
             left = prefs.getFloat(KEY_FRAME_L, FrameTarget.LEFT),
             top = prefs.getFloat(KEY_FRAME_T, FrameTarget.TOP),
@@ -142,6 +146,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 settleMs = settle,
                 soundOn = sound,
                 markPhotos = mark,
+                saveDieCrops = crops,
                 frame = frame,
                 status = if (guide) "Paused" else "Starting camera..."
             )
@@ -395,7 +400,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteSession(id: Long) {
         viewModelScope.launch {
             val rolls = db.rolls().list(id)
-            rolls.forEach { photos.delete(it.photoPath) }
+            rolls.forEach { deleteRollFiles(it) }
             val session = db.sessions().get(id) ?: return@launch
             db.sessions().delete(session)
             if (sessionId.value == id) {
@@ -417,8 +422,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val roll = db.rolls().get(id)
             if (roll != null) {
-                photos.delete(roll.photoPath)
-                photos.delete(roll.debugPath)
+                deleteRollFiles(roll)
                 db.rolls().delete(roll)
             }
             _ui.update { it.copy(detailId = null, confirmDelete = false) }
@@ -476,6 +480,11 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     fun setMarkPhotos(on: Boolean) {
         prefs.edit().putBoolean(KEY_MARK, on).apply()
         _ui.update { it.copy(markPhotos = on) }
+    }
+
+    fun setSaveDieCrops(on: Boolean) {
+        prefs.edit().putBoolean(KEY_CROPS, on).apply()
+        _ui.update { it.copy(saveDieCrops = on) }
     }
 
     fun setFrame(rect: NormRect) {
@@ -559,13 +568,21 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         if (sid <= 0) return -1
         val ts = System.currentTimeMillis()
         val mark = _ui.value.markPhotos && image != null && det != null
+        val keepCrops = _ui.value.saveDieCrops && image != null && det != null && det.dice.isNotEmpty()
         val saved = withContext(Dispatchers.IO) {
             val path = photos.save(jpeg, ts)
             val debug = if (mark) {
                 val overlay = DebugMarks.annotate(image!!, det!!)
                 photos.save(rgbToJpeg(overlay), ts, "-mark")
             } else null
-            path to debug
+            val crops = if (keepCrops) {
+                det!!.dice.mapIndexed { index, die ->
+                    val pad = (max(die.w, die.h) * 0.15f).toInt()
+                    val crop = ImageOps.crop(image!!, die.x - pad, die.y - pad, die.w + pad * 2, die.h + pad * 2)
+                    photos.save(rgbToJpeg(crop), ts, "-die$index")
+                }.joinToString("\n")
+            } else null
+            Triple(path, debug, crops)
         }
         val total = if (unread) 0 else d1 + d2
         val id = db.rolls().insert(
@@ -583,7 +600,8 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 pipsJson = det?.pips?.let { encodePips(it) },
                 unread = unread,
                 readReason = reason,
-                debugPath = saved.second
+                debugPath = saved.second,
+                cropPaths = saved.third
             )
         )
         if (!unread) {
@@ -595,6 +613,12 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             Log.i(TAG, "unread saved: $reason")
         }
         return id
+    }
+
+    private fun deleteRollFiles(roll: RollEntity) {
+        photos.delete(roll.photoPath)
+        photos.delete(roll.debugPath)
+        roll.cropPaths?.lineSequence()?.forEach { photos.delete(it) }
     }
 
     private fun showFlash(text: String, seven: Boolean) {
@@ -699,6 +723,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         private const val KEY_SETTLE = "settleMs"
         private const val KEY_SOUND = "sound"
         private const val KEY_MARK = "markPhotos"
+        private const val KEY_CROPS = "saveDieCrops"
         private const val KEY_FRAME_L = "frameL"
         private const val KEY_FRAME_T = "frameT"
         private const val KEY_FRAME_R = "frameR"
