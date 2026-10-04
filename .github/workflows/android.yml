@@ -42,7 +42,8 @@ jobs:
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
           ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-        run: chmod +x ./gradlew && ./gradlew assembleDebug --stacktrace
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+        run: chmod +x ./gradlew && ./gradlew assembleDebug --stacktrace -PversionCode=${{ github.run_number }}
 
       - name: Name the APK
         run: cp android/app/build/outputs/apk/debug/app-debug.apk srr-tracker-debug.apk
@@ -61,4 +62,4 @@ jobs:
           gh release create latest ./srr-tracker-debug.apk \
             --target "${{ github.sha }}" \
             --title "SRR Tracker (debug APK)" \
-            --notes "Debug build from ${{ github.sha }}. On the phone: allow install from unknown sources, download srr-tracker-debug.apk, and open it."
+            --notes "Debug build ${{ github.run_number }} from ${{ github.sha }}. On the phone: allow install from unknown sources, download srr-tracker-debug.apk, and open it. If an older copy is already installed and Android says App not installed, uninstall that copy once. Later downloads of this link update in place."

@@ -12,13 +12,13 @@ Each push to `main` builds a debug APK and publishes it on the `latest` release.
 1. On the phone, open this link in Chrome:
    `https://github.com/justinguillaume-beep/srr-tracker/releases/download/latest/srr-tracker-debug.apk`
 2. If Android blocks the download, allow it: **Settings → Security** (or **Apps → Special app access**) → **Install unknown apps** → turn it on for Chrome (or Files).
-3. Open `srr-tracker-debug.apk` and tap Install.
+3. Open `srr-tracker-debug.apk` and tap Install. If Android says **App not installed** and SRR Tracker is already on the phone, uninstall that copy once, then install this file. Copies built before the shared debug key cannot be updated in place. After this install, downloading the same link again updates the app without another uninstall.
 4. Open **SRR Tracker**. Allow the camera. Follow the three setup screens: the phone lies face-down, and the dice should sit inside the box on screen.
 5. Tap **Start**. Put the dice in the box, or throw them. The box turns green when it sees them. The status line then says **Dice seen**, **Holding still...**, **Capturing...**, **Counting...**, and **Logged 7** (or whatever the total is). Dice that are already sitting in the box are counted too. You do not have to throw them first. Sevens in the list are red.
 6. If it cannot read the pips, it opens a check screen and tells you why. Tap the two numbers and save. **Count now** takes a photo immediately. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it.
 7. Menu: new session, past sessions, save spreadsheet (also copied to Downloads), settings (how easily a throw is noticed, how long the dice must sit still, and a **Beep on each roll** switch that starts off). There is no vibration.
 
-The APK is a debug build signed with the debug key. Updating means downloading that same link again (the `latest` release is replaced on every push to main).
+The APK is a debug build signed with the keystore in `android/app/debug.keystore`, the same key on every build. Each GitHub build gets a higher `versionCode` (the workflow run number), so a newer download can replace the installed app. `minSdk` is 26 and the APK includes arm64-v8a, armeabi-v7a, x86, and x86_64. Updating means downloading that same link again (the `latest` release is replaced on every push to main).
 
 ### What the Android app does
 

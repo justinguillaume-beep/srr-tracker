@@ -7,6 +7,12 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+val ciVersionCode = run {
+    val fromProp = (findProperty("versionCode") as String?)?.toIntOrNull()
+    val fromEnv = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+    (fromProp ?: fromEnv ?: 1).coerceAtLeast(1)
+}
+
 android {
     namespace = "com.srrtracker"
     compileSdk = 35
@@ -15,12 +21,24 @@ android {
         applicationId = "com.srrtracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = ciVersionCode
+        versionName = "1.0.$ciVersionCode"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
