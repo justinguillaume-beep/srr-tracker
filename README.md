@@ -15,8 +15,8 @@ Each push to `main` builds a debug APK and publishes it on the `latest` release.
 3. Open `srr-tracker-debug.apk` and tap Install. If Android says **App not installed** and SRR Tracker is already on the phone, uninstall that copy once, then install this file. Copies built before the shared debug key cannot be updated in place. After this install, downloading the same link again updates the app without another uninstall.
 4. Open **SRR Tracker**. Allow the camera. Follow the three setup screens: the phone lies face-down, and the dice should sit inside the box on screen.
 5. Tap **Start**. Put the dice in the box, or throw them. The box turns green when it sees them. The status line then says **Dice seen**, **Holding still...**, **Capturing...**, **Counting...**, and **Logged 7** (or whatever the total is). Dice that are already sitting in the box are counted too. You do not have to throw them first. Sevens in the list are red.
-6. If it cannot read the pips, it opens a check screen and tells you why. Tap the two numbers and save. **Count now** takes a photo immediately. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it.
-7. Menu: new session, past sessions, save spreadsheet (also copied to Downloads), settings (how easily a throw is noticed, how long the dice must sit still, and a **Beep on each roll** switch that starts off). There is no vibration.
+6. If it cannot read the pips, it opens a check screen and tells you why. Tap the two numbers and save. **Count now** takes a photo immediately. **Undo last roll** removes the newest one. Tap a roll to see its photo, fix a number, or delete it. A roll the camera could not read stays in the list as **unread** so you can tap it and enter the dice.
+7. Drag the box onto the two dice you are throwing, and drag a corner to resize it. The camera only looks inside that box. If more than two dice are inside it, the status says how many it found instead of logging a guess. Settings has **Reset box**, **Beep on each roll** (off at first), and **Save a marked photo**. There is no vibration.
 
 The APK is a debug build signed with the keystore in `android/app/debug.keystore`, the same key on every build. Each GitHub build gets a higher `versionCode` (the workflow run number), so a newer download can replace the installed app. `minSdk` is 26 and the APK includes arm64-v8a, armeabi-v7a, x86, and x86_64. Updating means downloading that same link again (the `latest` release is replaced on every push to main).
 
@@ -42,7 +42,7 @@ On 18 synthetic photos at 1920×1080, with die sides of 40, 45, 50, 55, 60, 70, 
 
 ### Limits
 
-Pip counting is the same classical method as the web app (top-hat blobs + a 1–6 template), plus a crop-and-enlarge step for small dice. It is best with the phone straight down, decent light, and dice that stand out from the felt (white or red on green). Heavy glare, translucent casino dice, and dice outside the box are the cases it misses; those should land on the check screen instead of being saved as a guess. The app was compiled and unit-tested here; it has not been run on a physical phone in this environment. Nothing is uploaded.
+Justin's dice are small translucent purple dice and one amber die, with white pips, on grey cloth. Teal foam and the clutter beside the cloth are not counted as dice. Drag the box so only the two dice in use sit inside it. If the box holds more than two, the status says how many were found and nothing is logged as a pair. The pip faces on these translucent dice are not reliable enough to save on their own, so the roll stays unread and the check screen opens. The four table photos are in the unit tests. The app has not been run on a physical phone in this environment. Nothing is uploaded.
 
 ---
 

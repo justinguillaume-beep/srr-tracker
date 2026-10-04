@@ -42,6 +42,9 @@ class MotionGate(
     private var holdQuietUntil = 0L
     private var stampSettleOnNext = false
 
+    /** The on-screen box. Detection and "dice in the box" use only this rectangle. */
+    var frame: NormRect = NormRect(FrameTarget.LEFT, FrameTarget.TOP, FrameTarget.RIGHT, FrameTarget.BOTTOM)
+
     var running: Boolean = false
         set(value) {
             field = value
@@ -144,7 +147,7 @@ class MotionGate(
                     hasHoldRef = false
                     holdStableSince = -1L
                     holdQuietUntil = nowMs + POST_CAPTURE_QUIET_MS
-                    roi = if (hasStill) changedRoi(lastStill, gray) else null
+                    roi = frame
                     detail = "still long enough, capture"
                 } else {
                     detail = "settling"
@@ -252,10 +255,10 @@ class MotionGate(
     }
 
     fun diceInBox(gray: IntArray): Boolean {
-        val x0 = (FrameTarget.LEFT * W).toInt()
-        val x1 = (FrameTarget.RIGHT * W).toInt()
-        val y0 = (FrameTarget.TOP * H).toInt()
-        val y1 = (FrameTarget.BOTTOM * H).toInt()
+        val x0 = (frame.left * W).toInt().coerceIn(0, W - 1)
+        val x1 = (frame.right * W).toInt().coerceIn(x0 + 1, W)
+        val y0 = (frame.top * H).toInt().coerceIn(0, H - 1)
+        val y1 = (frame.bottom * H).toInt().coerceIn(y0 + 1, H)
         if (x1 <= x0 || y1 <= y0) return false
         val border = ArrayList<Int>(((x1 - x0) + (y1 - y0)) / 2 + 8)
         var x = x0
@@ -321,10 +324,10 @@ class MotionGate(
     }
 
     private fun boxDiff(a: IntArray, b: IntArray): Int {
-        val x0 = (FrameTarget.LEFT * W).toInt()
-        val x1 = (FrameTarget.RIGHT * W).toInt()
-        val y0 = (FrameTarget.TOP * H).toInt()
-        val y1 = (FrameTarget.BOTTOM * H).toInt()
+        val x0 = (frame.left * W).toInt().coerceIn(0, W - 1)
+        val x1 = (frame.right * W).toInt().coerceIn(x0 + 1, W)
+        val y0 = (frame.top * H).toInt().coerceIn(0, H - 1)
+        val y1 = (frame.bottom * H).toInt().coerceIn(y0 + 1, H)
         val diff = minDiff
         var n = 0
         for (y in y0 until y1) {

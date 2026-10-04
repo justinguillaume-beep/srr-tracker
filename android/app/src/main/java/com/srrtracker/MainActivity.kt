@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
@@ -48,12 +49,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -74,7 +77,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.srrtracker.camera.AutoCapture
-import com.srrtracker.detect.FrameTarget
+import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.decodePips
 import com.srrtracker.ui.PendingCheck
 import com.srrtracker.ui.RollRow
@@ -190,7 +193,7 @@ private fun GuideScreen(vm: TrackerViewModel, state: UiState) {
                         Modifier.fillMaxWidth().weight(1f).heightIn(min = 180.dp)
                     ) {
                         CameraPane(vm, running = false, modifier = Modifier.fillMaxSize())
-                        FramingOverlay(state.diceInBox, Modifier.fillMaxSize())
+                        FramingOverlay(state.diceInBox, state.frame, vm::setFrame, Modifier.fillMaxSize())
                     }
                 } else {
                     Text("The camera is off. Go back and tap Allow camera.", color = Seven, fontSize = 20.sp)
@@ -243,7 +246,7 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
                 running = state.running,
                 modifier = Modifier.fillMaxSize()
             )
-            FramingOverlay(state.diceInBox, Modifier.fillMaxSize())
+            FramingOverlay(state.diceInBox, state.frame, vm::setFrame, Modifier.fillMaxSize())
         }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -303,9 +306,9 @@ private fun RollLine(row: RollRow, onClick: () -> Unit) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("#${row.number}", color = Muted, fontSize = 16.sp, modifier = Modifier.width(52.dp))
             Text(
-                "${row.total}",
-                color = if (row.isSeven) Seven else Ink,
-                fontSize = 36.sp,
+                if (row.unread) "unread" else "${row.total}",
+                color = if (row.isSeven) Seven else if (row.unread) Color(0xFFFFC107) else Ink,
+                fontSize = if (row.unread) 22.sp else 36.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
@@ -410,6 +413,9 @@ private fun DetailScreen(vm: TrackerViewModel, state: UiState) {
                 }
             }
         }
+        if (roll.unread || !roll.readReason.isNullOrBlank()) {
+            Text(roll.readReason ?: "Could not read the dice.", color = Color(0xFFFFC107), fontSize = 18.sp)
+        }
         Text("Tap a number to fix a die.", color = Muted, fontSize = 16.sp)
         DiePicker("Left die", roll.d1) { vm.correctDetail(0, it) }
         DiePicker("Right die", roll.d2) { vm.correctDetail(1, it) }
@@ -486,6 +492,12 @@ private fun SettingsDialog(vm: TrackerViewModel, state: UiState) {
                 Text("Beep on each roll", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
                 Switch(checked = state.soundOn, onCheckedChange = { vm.setSound(it) })
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Save a marked photo", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                Switch(checked = state.markPhotos, onCheckedChange = { vm.setMarkPhotos(it) })
+            }
+            Text("Drag the box onto the two dice. Drag a corner to resize it.", color = Muted, fontSize = 16.sp)
+            BigButton("Reset box", { vm.resetFrame() }, Modifier.fillMaxWidth(), primary = false)
             BigButton("Done", { vm.closeSettings() }, Modifier.fillMaxWidth())
         }
     }
@@ -536,6 +548,7 @@ private fun CameraPane(vm: TrackerViewModel, running: Boolean, modifier: Modifie
         capture.gate.sensitivity = state.sensitivity
         capture.gate.settleMs = state.settleMs
         capture.gate.running = running
+        capture.gate.frame = state.frame
     }
     LaunchedEffect(state.manualCapture) {
         if (state.manualCapture) {
@@ -566,14 +579,73 @@ private fun CameraPane(vm: TrackerViewModel, running: Boolean, modifier: Modifie
 }
 
 @Composable
-private fun FramingOverlay(diceInBox: Boolean, modifier: Modifier = Modifier) {
+private fun FramingOverlay(
+    diceInBox: Boolean,
+    frame: NormRect,
+    onFrame: (NormRect) -> Unit,
+    modifier: Modifier = Modifier
+) {
     val color = if (diceInBox) Good else Color.White
+    val latest = rememberUpdatedState(frame)
     Box(modifier) {
-        Canvas(Modifier.fillMaxSize()) {
-            val l = size.width * FrameTarget.LEFT
-            val t = size.height * FrameTarget.TOP
-            val r = size.width * FrameTarget.RIGHT
-            val b = size.height * FrameTarget.BOTTOM
+        Canvas(
+            Modifier.fillMaxSize().pointerInput(Unit) {
+                detectDragGestures { change, drag ->
+                    change.consume()
+                    val w = size.width.toFloat().coerceAtLeast(1f)
+                    val h = size.height.toFloat().coerceAtLeast(1f)
+                    val cur = latest.value
+                    val l = cur.left * w
+                    val t = cur.top * h
+                    val r = cur.right * w
+                    val b = cur.bottom * h
+                    val x = change.position.x
+                    val y = change.position.y
+                    val edge = 48f
+                    val nearL = kotlin.math.abs(x - l) <= edge
+                    val nearR = kotlin.math.abs(x - r) <= edge
+                    val nearT = kotlin.math.abs(y - t) <= edge
+                    val nearB = kotlin.math.abs(y - b) <= edge
+                    var nl = l
+                    var nt = t
+                    var nr = r
+                    var nb = b
+                    val inside = x in l..r && y in t..b
+                    if (!inside && !nearL && !nearR && !nearT && !nearB) return@detectDragGestures
+                    if (inside && !(nearL || nearR || nearT || nearB)) {
+                        nl += drag.x
+                        nr += drag.x
+                        nt += drag.y
+                        nb += drag.y
+                    } else {
+                        if (nearL) nl += drag.x
+                        if (nearR) nr += drag.x
+                        if (nearT) nt += drag.y
+                        if (nearB) nb += drag.y
+                    }
+                    val minW = w * 0.12f
+                    val minH = h * 0.12f
+                    if (nr - nl < minW) {
+                        if (nearL && !nearR) nl = nr - minW else nr = nl + minW
+                    }
+                    if (nb - nt < minH) {
+                        if (nearT && !nearB) nt = nb - minH else nb = nt + minH
+                    }
+                    onFrame(
+                        NormRect(
+                            left = (nl / w).coerceIn(0f, 0.88f),
+                            top = (nt / h).coerceIn(0f, 0.88f),
+                            right = (nr / w).coerceIn(0.12f, 1f),
+                            bottom = (nb / h).coerceIn(0.12f, 1f)
+                        )
+                    )
+                }
+            }
+        ) {
+            val l = size.width * frame.left
+            val t = size.height * frame.top
+            val r = size.width * frame.right
+            val b = size.height * frame.bottom
             drawRoundRect(
                 color = color,
                 topLeft = Offset(l, t),
@@ -581,9 +653,13 @@ private fun FramingOverlay(diceInBox: Boolean, modifier: Modifier = Modifier) {
                 cornerRadius = CornerRadius(24f, 24f),
                 style = Stroke(width = 5f)
             )
+            val handle = 14f
+            for (c in listOf(Offset(l, t), Offset(r, t), Offset(l, b), Offset(r, b))) {
+                drawCircle(color = color, radius = handle, center = c)
+            }
         }
         Text(
-            if (diceInBox) "Dice in the box" else "Put the dice in the box",
+            if (diceInBox) "Dice in the box" else "Drag the box onto the dice",
             color = color,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,

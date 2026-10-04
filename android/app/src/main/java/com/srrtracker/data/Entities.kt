@@ -36,5 +36,8 @@ data class RollEntity(
     val detectedD1: Int?,
     val detectedD2: Int?,
     val confidence: String?,
-    val pipsJson: String?
+    val pipsJson: String?,
+    val unread: Boolean = false,
+    val readReason: String? = null,
+    val debugPath: String? = null
 )

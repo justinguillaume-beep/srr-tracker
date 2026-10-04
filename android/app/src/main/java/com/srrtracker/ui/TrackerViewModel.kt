@@ -8,11 +8,14 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.srrtracker.camera.rgbToJpeg
 import com.srrtracker.data.AppDatabase
 import com.srrtracker.data.PhotoStore
 import com.srrtracker.data.RollEntity
 import com.srrtracker.data.Session
+import com.srrtracker.detect.DebugMarks
 import com.srrtracker.detect.DiceDetector
+import com.srrtracker.detect.FrameTarget
 import com.srrtracker.detect.MotionGate
 import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.RgbImage
@@ -44,7 +47,9 @@ data class RollRow(
     val number: Int,
     val total: Int,
     val ratio: String,
-    val isSeven: Boolean
+    val isSeven: Boolean,
+    val unread: Boolean = false,
+    val reason: String? = null
 )
 
 data class PendingCheck(
@@ -52,7 +57,8 @@ data class PendingCheck(
     val d1: Int?,
     val d2: Int?,
     val detected: DiceDetector.Detection?,
-    val reason: String
+    val reason: String,
+    val rollId: Long = 0
 )
 
 data class SessionSummary(
@@ -86,10 +92,12 @@ data class UiState(
     val sensitivity: Int = 50,
     val settleMs: Long = 500L,
     val soundOn: Boolean = false,
+    val markPhotos: Boolean = true,
     val sessionName: String = "",
     val cameraMessage: String? = null,
     val busy: Boolean = false,
-    val manualCapture: Boolean = false
+    val manualCapture: Boolean = false,
+    val frame: NormRect = NormRect(FrameTarget.LEFT, FrameTarget.TOP, FrameTarget.RIGHT, FrameTarget.BOTTOM)
 )
 
 sealed interface UiEffect {
@@ -120,12 +128,21 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         val sensitivity = prefs.getInt(KEY_SENS, 50)
         val settle = prefs.getLong(KEY_SETTLE, 500L)
         val sound = prefs.getBoolean(KEY_SOUND, false)
+        val mark = prefs.getBoolean(KEY_MARK, true)
+        val frame = NormRect(
+            left = prefs.getFloat(KEY_FRAME_L, FrameTarget.LEFT),
+            top = prefs.getFloat(KEY_FRAME_T, FrameTarget.TOP),
+            right = prefs.getFloat(KEY_FRAME_R, FrameTarget.RIGHT),
+            bottom = prefs.getFloat(KEY_FRAME_B, FrameTarget.BOTTOM)
+        )
         _ui.update {
             it.copy(
                 guideDone = guide,
                 sensitivity = sensitivity,
                 settleMs = settle,
                 soundOn = sound,
+                markPhotos = mark,
+                frame = frame,
                 status = if (guide) "Paused" else "Starting camera..."
             )
         }
@@ -228,20 +245,21 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val solid = det != null && det.ok && det.confidence == "high" && det.d1 != null && det.d2 != null
                 if (solid) {
-                    val saved = saveRoll(det!!.d1!!, det.d2!!, jpeg, det, userChanged = false)
-                    if (!saved) {
+                    val saved = saveRoll(det!!.d1!!, det.d2!!, jpeg, image, det, userChanged = false, unread = false, reason = null)
+                    if (saved <= 0) {
                         showFlash("Could not read the dice. No session is open.", false)
                     }
                     _ui.update { it.copy(busy = false) }
                 } else {
                     val reason = readFailureReason(det)
+                    val rollId = saveRoll(0, 0, jpeg, image, det, userChanged = false, unread = true, reason = reason)
                     openedCheck = true
                     _ui.update {
                         it.copy(
                             status = "Could not read the dice. $reason",
                             statusIsSeven = false,
                             busy = false,
-                            pending = PendingCheck(jpeg, det?.d1, det?.d2, det, reason)
+                            pending = PendingCheck(jpeg, det?.d1, det?.d2, det, reason, rollId)
                         )
                     }
                 }
@@ -276,7 +294,24 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val det = pending.detected
             val changed = det == null || !det.ok || det.d1 != d1 || det.d2 != d2
-            saveRoll(d1, d2, pending.jpeg, det, userChanged = changed)
+            if (pending.rollId > 0) {
+                val roll = db.rolls().get(pending.rollId)
+                if (roll != null) {
+                    db.rolls().update(
+                        roll.copy(
+                            d1 = d1,
+                            d2 = d2,
+                            total = d1 + d2,
+                            corrected = changed,
+                            unread = false,
+                            readReason = null
+                        )
+                    )
+                    showFlash("Logged ${d1 + d2}", d1 + d2 == 7)
+                }
+            } else {
+                saveRoll(d1, d2, pending.jpeg, null, det, userChanged = changed, unread = false, reason = null)
+            }
             _ui.update { it.copy(pending = null) }
             counting.set(false)
         }
@@ -285,7 +320,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     fun skipPending() {
         _ui.update { it.copy(pending = null) }
         counting.set(false)
-        publishLiveStatus()
+        showFlash("Photo kept. Tap unread to enter the dice.", false)
     }
 
     fun undoLast() {
@@ -383,6 +418,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             val roll = db.rolls().get(id)
             if (roll != null) {
                 photos.delete(roll.photoPath)
+                photos.delete(roll.debugPath)
                 db.rolls().delete(roll)
             }
             _ui.update { it.copy(detailId = null, confirmDelete = false) }
@@ -396,12 +432,22 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             val roll = db.rolls().get(id) ?: return@launch
             val d1 = if (die == 0) value else roll.d1
             val d2 = if (die == 1) value else roll.d2
-            val total = d1 + d2
+            val entered = d1 in 1..6 && d2 in 1..6
+            val total = if (entered) d1 + d2 else 0
             val detectedTotal = if (roll.detectedD1 != null && roll.detectedD2 != null) {
                 roll.detectedD1 + roll.detectedD2
             } else null
             val corrected = roll.corrected || detectedTotal == null || detectedTotal != total
-            db.rolls().update(roll.copy(d1 = d1, d2 = d2, total = total, corrected = corrected))
+            db.rolls().update(
+                roll.copy(
+                    d1 = d1,
+                    d2 = d2,
+                    total = total,
+                    corrected = corrected,
+                    unread = !entered,
+                    readReason = if (entered) null else roll.readReason
+                )
+            )
         }
     }
 
@@ -427,6 +473,33 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(soundOn = on) }
     }
 
+    fun setMarkPhotos(on: Boolean) {
+        prefs.edit().putBoolean(KEY_MARK, on).apply()
+        _ui.update { it.copy(markPhotos = on) }
+    }
+
+    fun setFrame(rect: NormRect) {
+        val next = NormRect(
+            left = rect.left.coerceIn(0f, 0.85f),
+            top = rect.top.coerceIn(0f, 0.85f),
+            right = rect.right.coerceIn(0.15f, 1f),
+            bottom = rect.bottom.coerceIn(0.15f, 1f)
+        ).let {
+            if (it.right - it.left < 0.12f || it.bottom - it.top < 0.12f) _ui.value.frame else it
+        }
+        prefs.edit()
+            .putFloat(KEY_FRAME_L, next.left)
+            .putFloat(KEY_FRAME_T, next.top)
+            .putFloat(KEY_FRAME_R, next.right)
+            .putFloat(KEY_FRAME_B, next.bottom)
+            .apply()
+        _ui.update { it.copy(frame = next) }
+    }
+
+    fun resetFrame() {
+        setFrame(NormRect(FrameTarget.LEFT, FrameTarget.TOP, FrameTarget.RIGHT, FrameTarget.BOTTOM))
+    }
+
     fun exportCsv() {
         viewModelScope.launch {
             val sessions = db.sessions().all().sortedBy { it.startedAt }
@@ -434,7 +507,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 val rolls = db.rolls().list(session.id)
                 SrrStats.CsvSession(
                     name = session.name,
-                    rolls = rolls.map { r ->
+                    rolls = rolls.filter { !it.unread }.map { r ->
                         SrrStats.CsvRoll(
                             ts = r.ts,
                             d1 = r.d1,
@@ -476,34 +549,52 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         d1: Int,
         d2: Int,
         jpeg: ByteArray,
+        image: RgbImage?,
         det: DiceDetector.Detection?,
-        userChanged: Boolean
-    ): Boolean {
+        userChanged: Boolean,
+        unread: Boolean,
+        reason: String?
+    ): Long {
         val sid = sessionId.value
-        if (sid <= 0) return false
+        if (sid <= 0) return -1
         val ts = System.currentTimeMillis()
-        val path = withContext(Dispatchers.IO) { photos.save(jpeg, ts) }
-        val total = d1 + d2
-        db.rolls().insert(
+        val mark = _ui.value.markPhotos && image != null && det != null
+        val saved = withContext(Dispatchers.IO) {
+            val path = photos.save(jpeg, ts)
+            val debug = if (mark) {
+                val overlay = DebugMarks.annotate(image!!, det!!)
+                photos.save(rgbToJpeg(overlay), ts, "-mark")
+            } else null
+            path to debug
+        }
+        val total = if (unread) 0 else d1 + d2
+        val id = db.rolls().insert(
             RollEntity(
                 sessionId = sid,
                 ts = ts,
                 d1 = d1,
                 d2 = d2,
                 total = total,
-                photoPath = path,
+                photoPath = saved.first,
                 corrected = userChanged,
                 detectedD1 = det?.d1,
                 detectedD2 = det?.d2,
-                confidence = det?.confidence,
-                pipsJson = det?.pips?.let { encodePips(it) }
+                confidence = if (unread) "unread" else det?.confidence,
+                pipsJson = det?.pips?.let { encodePips(it) },
+                unread = unread,
+                readReason = reason,
+                debugPath = saved.second
             )
         )
-        val state = _ui.value
-        feedback.onLogged(total == 7, state.soundOn)
-        Log.i(TAG, "logged $total")
-        showFlash("Logged $total", total == 7)
-        return true
+        if (!unread) {
+            val state = _ui.value
+            feedback.onLogged(total == 7, state.soundOn)
+            Log.i(TAG, "logged $total")
+            showFlash("Logged $total", total == 7)
+        } else {
+            Log.i(TAG, "unread saved: $reason")
+        }
+        return id
     }
 
     private fun showFlash(text: String, seven: Boolean) {
@@ -535,16 +626,21 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun applyRolls(list: List<RollEntity>) {
         currentRolls = list
-        val totals = list.map { it.total }
+        val counted = list.filter { !it.unread }
+        val totals = counted.map { it.total }
         val running = SrrStats.running(totals)
+        val ratioById = counted.mapIndexed { i, roll -> roll.id to running[i].ratio }.toMap()
         val sum = SrrStats.summary(totals)
         val rows = list.indices.reversed().map { i ->
+            val roll = list[i]
             RollRow(
-                id = list[i].id,
+                id = roll.id,
                 number = i + 1,
-                total = list[i].total,
-                ratio = running[i].ratio,
-                isSeven = list[i].total == 7
+                total = roll.total,
+                ratio = if (roll.unread) "—" else ratioById[roll.id] ?: "—",
+                isSeven = !roll.unread && roll.total == 7,
+                unread = roll.unread,
+                reason = roll.readReason
             )
         }
         _ui.update {
@@ -602,6 +698,11 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         private const val KEY_SENS = "sensitivity"
         private const val KEY_SETTLE = "settleMs"
         private const val KEY_SOUND = "sound"
+        private const val KEY_MARK = "markPhotos"
+        private const val KEY_FRAME_L = "frameL"
+        private const val KEY_FRAME_T = "frameT"
+        private const val KEY_FRAME_R = "frameR"
+        private const val KEY_FRAME_B = "frameB"
         private const val TAG = "SrrTracker"
     }
 }

@@ -6,8 +6,8 @@ import java.io.File
 class PhotoStore(context: Context) {
     private val dir = File(context.filesDir, "photos").apply { mkdirs() }
 
-    fun save(jpeg: ByteArray, ts: Long): String {
-        val file = File(dir, "roll-$ts.jpg")
+    fun save(jpeg: ByteArray, ts: Long, suffix: String = ""): String {
+        val file = File(dir, "roll-$ts$suffix.jpg")
         file.writeBytes(jpeg)
         return file.absolutePath
     }

@@ -46,3 +46,12 @@ fun downscaledJpeg(bitmap: Bitmap, maxEdge: Int = 1280, quality: Int = 74): Byte
     if (scaled !== bitmap) scaled.recycle()
     return out.toByteArray()
 }
+
+fun rgbToJpeg(image: RgbImage, quality: Int = 74): ByteArray {
+    val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+    bitmap.setPixels(image.pixels, 0, image.width, 0, 0, image.width, image.height)
+    val out = ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+    bitmap.recycle()
+    return out.toByteArray()
+}

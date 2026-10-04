@@ -70,11 +70,14 @@ object DiceDetector {
         val radius: Int? = null,
         val votes: Int = 0,
         val ms: Long = 0,
-        val roi: IntRect? = null
+        val roi: IntRect? = null,
+        val dice: List<DieMark> = emptyList()
     ) {
         val d1: Int? get() = counts?.getOrNull(0)
         val d2: Int? get() = counts?.getOrNull(1)
     }
+
+    data class DieMark(val x: Int, val y: Int, val w: Int, val h: Int, val count: Int)
 
     class PipBlob(
         val x: Double,
@@ -92,6 +95,35 @@ object DiceDetector {
      * [motionRoi] is the normalized box where the preview saw the throw.
      */
     fun detectRoll(image: RgbImage, motionRoi: NormRect? = null): Detection {
+        val t0 = System.nanoTime()
+        val colored = try {
+            ColoredDiceReader.read(image, motionRoi)
+        } catch (_: Throwable) {
+            null
+        }
+        if (colored != null && colored.dice.isNotEmpty()) {
+            return colored.copy(ms = (System.nanoTime() - t0) / 1_000_000)
+        }
+        val photo = try {
+            PhotoDiceReader.read(image)
+        } catch (_: Throwable) {
+            null
+        }
+        if (photo != null && photo.ok && photo.confidence == "high" && photo.d1 != null && photo.d2 != null) {
+            return photo.copy(ms = (System.nanoTime() - t0) / 1_000_000)
+        }
+        val classic = detectRollClassic(image, motionRoi)
+        val classicMs = (System.nanoTime() - t0) / 1_000_000
+        if (classic.ok && classic.confidence == "high") {
+            return classic.copy(ms = classicMs, dice = photo?.dice ?: classic.dice)
+        }
+        if (photo != null && photo.ok) return photo.copy(ms = classicMs)
+        if (classic.ok) return classic.copy(ms = classicMs, dice = photo?.dice ?: classic.dice)
+        val failed = photo ?: classic
+        return failed.copy(ms = classicMs, dice = photo?.dice ?: failed.dice, reason = photo?.reason ?: failed.reason)
+    }
+
+    private fun detectRollClassic(image: RgbImage, motionRoi: NormRect?): Detection {
         val t0 = System.nanoTime()
         val located = DiceLocator.locate(image)
         val motion = motionRoi?.takeIf { it.area() in 0.004f..0.45f }?.let { norm ->
