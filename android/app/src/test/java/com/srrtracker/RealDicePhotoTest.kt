@@ -18,6 +18,10 @@ import java.io.InputStream
  * 0cb28426… four dice: 6, 5, 3, 6
  * 0f574bd7… two dice: 2, 1
  * 156f4bdb… two dice: 6, 6
+ * 5ec3a0f2… and d1e4f113… six dice each (five purple, one gold) after the phone was moved.
+ * On 5ec3a0f2 the gold face (lower left) is a diagonal 3 once extra bright spots are ignored.
+ * On d1e4f113 the gold face reads 6. Other faces on those two photos are glare, shadow,
+ * or a clipped box, so only the die count and those two gold reads are asserted.
  */
 class RealDicePhotoTest {
     @Test
@@ -26,15 +30,26 @@ class RealDicePhotoTest {
             "3643033e8104f89a148c9882316c12729b3c8719e0b411ac708b2274819fbd61.jpg" to 6,
             "0cb28426ded7371c6a8c8b65ffa75ba253b5ac3672fb5bb985bdca43728372e1.jpg" to 4,
             "0f574bd769c86927046ef7647106781fea22735124dba8dca42d31989df2044c.jpg" to 2,
-            "156f4bdbb11797dee3ada222b990255054bc8d9ff4944a7c929ce83d3454df52.jpg" to 2
+            "156f4bdbb11797dee3ada222b990255054bc8d9ff4944a7c929ce83d3454df52.jpg" to 2,
+            "5ec3a0f20cf0684be858d21ce6f239df30adf07ee96b9a6602b1034ac7d5d35f.jpg" to 6,
+            "d1e4f1133a533b6cd1bbefede8370d3ebba60c90a6974eb0a5eb893f8397ff28.jpg" to 6
         )
         for ((name, n) in expect) {
             val det = ColoredDiceReader.read(load(name))
             val faces = det.dice.joinToString(",") { it.count.toString() }
-            println("$name dice=${det.dice.size} ok=${det.ok} reason=${det.reason} faces=$faces counts=${det.counts}")
+            val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+            println("$name dice=${det.dice.size} ok=${det.ok} reason=${det.reason} faces=$faces boxes=$boxes")
             assertEquals(name, n, det.dice.size)
             if (name.startsWith("3643033e")) {
                 assertTrue("amber die should read 6, faces=$faces", det.dice.any { it.count == 6 })
+            }
+            if (name.startsWith("5ec3a0f2")) {
+                val gold = det.dice.single { it.x < 1200 && it.y in 2700..2950 }
+                assertEquals("gold face, faces=$faces", 3, gold.count)
+            }
+            if (name.startsWith("d1e4f113")) {
+                val gold = det.dice.single { it.x < 1200 && it.y in 2050..2400 }
+                assertEquals("gold face, faces=$faces", 6, gold.count)
             }
             if (n == 2) {
                 assertEquals(name, 2, det.dice.size)
@@ -95,10 +110,15 @@ class RealDicePhotoTest {
         return decodeJpeg(stream)
     }
 
-    /** Host unit tests have javax.imageio; the Android compile stubs do not, so load it by name. */
+    /**
+     * Host unit tests have javax.imageio; the Android compile stubs do not, so load it by name.
+     * ImageIO ignores EXIF. The phone rotates via ExifInterface, and every table photo here
+     * is stored sideways, so the test rotates the same way before counting.
+     */
     private fun decodeJpeg(stream: InputStream): RgbImage {
+        val bytes = stream.readBytes()
         val imageIo = Class.forName("javax.imageio.ImageIO")
-        val buffered = imageIo.getMethod("read", InputStream::class.java).invoke(null, stream)
+        val buffered = imageIo.getMethod("read", InputStream::class.java).invoke(null, java.io.ByteArrayInputStream(bytes))
             ?: error("could not decode jpeg")
         val type = buffered.javaClass
         val w = type.getMethod("getWidth").invoke(buffered) as Int
@@ -114,6 +134,74 @@ class RealDicePhotoTest {
             Int::class.javaPrimitiveType,
             Int::class.javaPrimitiveType
         ).invoke(buffered, 0, 0, w, h, pixels, 0, w)
-        return RgbImage(w, h, pixels)
+        return when (jpegOrientation(bytes)) {
+            6 -> rotate90(w, h, pixels, clockwise = true)
+            8 -> rotate90(w, h, pixels, clockwise = false)
+            3 -> rotate180(w, h, pixels)
+            else -> RgbImage(w, h, pixels)
+        }
+    }
+
+    /** EXIF orientation tag, or 1 when the file has none. */
+    private fun jpegOrientation(bytes: ByteArray): Int {
+        var i = 2
+        while (i + 4 < bytes.size && bytes[i] == 0xFF.toByte()) {
+            val marker = bytes[i + 1].toInt() and 0xFF
+            if (marker == 0xD8 || marker == 0xD9) break
+            val len = ((bytes[i + 2].toInt() and 0xFF) shl 8) or (bytes[i + 3].toInt() and 0xFF)
+            if (len < 2 || i + 2 + len > bytes.size) break
+            if (marker == 0xE1 && i + 10 < bytes.size &&
+                bytes[i + 4] == 'E'.code.toByte() && bytes[i + 5] == 'x'.code.toByte()
+            ) {
+                return exifOrientation(bytes, i + 10, i + 2 + len)
+            }
+            if (marker == 0xDA) break
+            i += 2 + len
+        }
+        return 1
+    }
+
+    private fun exifOrientation(bytes: ByteArray, tiff: Int, end: Int): Int {
+        if (tiff + 8 > end) return 1
+        val le = bytes[tiff] == 'I'.code.toByte()
+        fun u16(at: Int): Int {
+            val a = bytes[at].toInt() and 0xFF
+            val b = bytes[at + 1].toInt() and 0xFF
+            return if (le) a or (b shl 8) else (a shl 8) or b
+        }
+        fun u32(at: Int): Int {
+            val a = bytes[at].toInt() and 0xFF
+            val b = bytes[at + 1].toInt() and 0xFF
+            val c = bytes[at + 2].toInt() and 0xFF
+            val d = bytes[at + 3].toInt() and 0xFF
+            return if (le) a or (b shl 8) or (c shl 16) or (d shl 24) else (a shl 24) or (b shl 16) or (c shl 8) or d
+        }
+        val ifd = tiff + u32(tiff + 4)
+        if (ifd + 2 > end) return 1
+        val n = u16(ifd)
+        for (k in 0 until n) {
+            val e = ifd + 2 + k * 12
+            if (e + 12 > end) return 1
+            if (u16(e) == 0x0112) return u16(e + 8)
+        }
+        return 1
+    }
+
+    private fun rotate90(w: Int, h: Int, pixels: IntArray, clockwise: Boolean): RgbImage {
+        val out = IntArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val nx = if (clockwise) h - 1 - y else y
+                val ny = if (clockwise) x else w - 1 - x
+                out[ny * h + nx] = pixels[y * w + x]
+            }
+        }
+        return RgbImage(h, w, out)
+    }
+
+    private fun rotate180(w: Int, h: Int, pixels: IntArray): RgbImage {
+        val out = IntArray(w * h)
+        for (i in pixels.indices) out[pixels.size - 1 - i] = pixels[i]
+        return RgbImage(w, h, out)
     }
 }

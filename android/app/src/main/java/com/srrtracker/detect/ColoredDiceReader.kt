@@ -144,8 +144,10 @@ object ColoredDiceReader {
             else if (yel > 48 && mx > 90 && b < 165 && chroma > 40 && g > 80) yellow[i] = true
         }
         val boxes = ArrayList<Box>()
-        boxes += components(close(purple, sw, sh), sw, sh, 'P', scale, image.width, image.height)
-        boxes += components(close(yellow, sw, sh), sw, sh, 'Y', scale, image.width, image.height)
+        boxes += components(close(purple, sw, sh, 1), sw, sh, 'P', scale, image.width, image.height, 0.32f)
+        // Gold dice are translucent, so the yellow mask is full of pip holes.
+        // A wider close joins those holes without lowering the yellow threshold.
+        boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, image.width, image.height, 0.27f)
         return dropSizeOutliers(mergeSameColor(boxes))
     }
 
@@ -155,7 +157,7 @@ object ColoredDiceReader {
         val median = sides[sides.size / 2].toFloat()
         return boxes.filter {
             val s = max(it.w, it.h).toFloat()
-            s >= median * 0.62f && s <= median * 1.65f
+            s >= median * 0.58f && s <= median * 1.65f
         }
     }
 
@@ -166,7 +168,8 @@ object ColoredDiceReader {
         kind: Char,
         scale: Float,
         fullW: Int,
-        fullH: Int
+        fullH: Int,
+        minFill: Float
     ): List<Box> {
         val minSide = (32f / scale).toInt().coerceIn(10, 48)
         val maxSide = (200f / scale).toInt().coerceIn(minSide + 8, 480)
@@ -175,6 +178,7 @@ object ColoredDiceReader {
         val seen = BooleanArray(mask.size)
         val out = ArrayList<Box>()
         val stack = IntArray(mask.size)
+        val pix = IntArray(mask.size)
         for (start in mask.indices) {
             if (!mask[start] || seen[start]) continue
             var sp = 0
@@ -187,9 +191,9 @@ object ColoredDiceReader {
             var maxY = 0
             while (sp > 0) {
                 val i = stack[--sp]
+                pix[area++] = i
                 val x = i % w
                 val y = i / w
-                area++
                 if (x < minX) minX = x
                 if (y < minY) minY = y
                 if (x > maxX) maxX = x
@@ -201,18 +205,136 @@ object ColoredDiceReader {
             }
             val bw = maxX - minX + 1
             val bh = maxY - minY + 1
+            // Two dice that touch become one blob wider than a single die.
+            // Split that blob at its narrow waist. A blob we already accept is left whole.
+            if ((bw > maxSide && bh in minSide..maxSide) || (bh > maxSide && bw in minSide..maxSide)) {
+                for (span in splitTouching(pix, area, w, bw > maxSide, minSide, maxSide)) {
+                    consider(out, span, kind, scale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill)
+                }
+                continue
+            }
             if (bw < minSide || bh < minSide || bw > maxSide || bh > maxSide) continue
             if (area !in minArea..maxArea) continue
             val aspect = bw.toFloat() / bh
             val fill = area.toFloat() / (bw * bh)
-            if (aspect !in 0.55f..1.80f || fill < 0.32f) continue
-            val x = (minX * scale).roundToInt().coerceIn(0, fullW - 1)
-            val y = (minY * scale).roundToInt().coerceIn(0, fullH - 1)
-            val r = ((maxX + 1) * scale).roundToInt().coerceIn(x + 1, fullW)
-            val b = ((maxY + 1) * scale).roundToInt().coerceIn(y + 1, fullH)
-            out += Box(x, y, r - x, b - y, area, kind)
+            if (aspect !in 0.55f..1.80f || fill < minFill) continue
+            out += toBox(minX, minY, maxX, maxY, area, kind, scale, fullW, fullH)
         }
         return out
+    }
+
+    private class Span(val x0: Int, val y0: Int, val x1: Int, val y1: Int, val area: Int)
+
+    /** Cut a side-by-side or stacked pair at the narrowest column or row. */
+    private fun splitTouching(pix: IntArray, n: Int, imgW: Int, horizontal: Boolean, minSide: Int, maxSide: Int): List<Span> {
+        var minA = Int.MAX_VALUE
+        var maxA = 0
+        for (k in 0 until n) {
+            val a = if (horizontal) pix[k] % imgW else pix[k] / imgW
+            if (a < minA) minA = a
+            if (a > maxA) maxA = a
+        }
+        val len = maxA - minA + 1
+        if (len <= minSide * 2) return emptyList()
+        val count = IntArray(len)
+        for (k in 0 until n) {
+            val a = if (horizontal) pix[k] % imgW else pix[k] / imgW
+            count[a - minA]++
+        }
+        var peak = 0
+        for (c in count) if (c > peak) peak = c
+        // Both halves have to be a single die. A cut in the thin tail does not count.
+        val lo = max(minSide, len - 1 - maxSide)
+        val hi = min(len - minSide, maxSide)
+        if (lo >= hi) return emptyList()
+        var bestI = -1
+        var bestV = Int.MAX_VALUE
+        for (i in lo until hi) {
+            if (count[i] < bestV) {
+                bestV = count[i]
+                bestI = i
+            }
+        }
+        if (bestI < 0 || peak == 0 || bestV > peak * 0.45f) return emptyList()
+        var leftPeak = 0
+        var rightPeak = 0
+        for (i in 0 until bestI) if (count[i] > leftPeak) leftPeak = count[i]
+        for (i in bestI + 1 until len) if (count[i] > rightPeak) rightPeak = count[i]
+        if (leftPeak < minSide || rightPeak < minSide) return emptyList()
+        if (bestV > leftPeak * 0.55f || bestV > rightPeak * 0.55f) return emptyList()
+        val cut = minA + bestI
+        var lx0 = Int.MAX_VALUE
+        var ly0 = Int.MAX_VALUE
+        var lx1 = 0
+        var ly1 = 0
+        var la = 0
+        var rx0 = Int.MAX_VALUE
+        var ry0 = Int.MAX_VALUE
+        var rx1 = 0
+        var ry1 = 0
+        var ra = 0
+        for (k in 0 until n) {
+            val i = pix[k]
+            val x = i % imgW
+            val y = i / imgW
+            val a = if (horizontal) x else y
+            if (a < cut) {
+                la++
+                if (x < lx0) lx0 = x
+                if (y < ly0) ly0 = y
+                if (x > lx1) lx1 = x
+                if (y > ly1) ly1 = y
+            } else if (a > cut) {
+                ra++
+                if (x < rx0) rx0 = x
+                if (y < ry0) ry0 = y
+                if (x > rx1) rx1 = x
+                if (y > ry1) ry1 = y
+            }
+        }
+        if (la == 0 || ra == 0) return emptyList()
+        return listOf(Span(lx0, ly0, lx1, ly1, la), Span(rx0, ry0, rx1, ry1, ra))
+    }
+
+    private fun consider(
+        out: MutableList<Box>,
+        span: Span,
+        kind: Char,
+        scale: Float,
+        fullW: Int,
+        fullH: Int,
+        minSide: Int,
+        maxSide: Int,
+        minArea: Int,
+        maxArea: Int,
+        minFill: Float
+    ) {
+        val bw = span.x1 - span.x0 + 1
+        val bh = span.y1 - span.y0 + 1
+        if (bw < minSide || bh < minSide || bw > maxSide || bh > maxSide) return
+        if (span.area !in minArea..maxArea) return
+        val aspect = bw.toFloat() / bh
+        val fill = span.area.toFloat() / (bw * bh)
+        if (aspect !in 0.55f..1.80f || fill < minFill) return
+        out += toBox(span.x0, span.y0, span.x1, span.y1, span.area, kind, scale, fullW, fullH)
+    }
+
+    private fun toBox(
+        minX: Int,
+        minY: Int,
+        maxX: Int,
+        maxY: Int,
+        area: Int,
+        kind: Char,
+        scale: Float,
+        fullW: Int,
+        fullH: Int
+    ): Box {
+        val x = (minX * scale).roundToInt().coerceIn(0, fullW - 1)
+        val y = (minY * scale).roundToInt().coerceIn(0, fullH - 1)
+        val r = ((maxX + 1) * scale).roundToInt().coerceIn(x + 1, fullW)
+        val b = ((maxY + 1) * scale).roundToInt().coerceIn(y + 1, fullH)
+        return Box(x, y, r - x, b - y, area, kind)
     }
 
     private fun push(mask: BooleanArray, seen: BooleanArray, stack: IntArray, sp: Int, i: Int): Int {
@@ -249,7 +371,7 @@ object ColoredDiceReader {
                     val nx1 = max(x1, c.x + c.w)
                     val ny1 = max(y1, c.y + c.h)
                     val aspect = (nx1 - nx0).toFloat() / max(1, ny1 - ny0)
-                    if (aspect !in 0.60f..1.70f) continue
+                    if (aspect !in 0.55f..1.70f) continue
                     x0 = nx0
                     y0 = ny0
                     x1 = nx1
@@ -262,26 +384,26 @@ object ColoredDiceReader {
             val w = x1 - x0
             val h = y1 - y0
             val aspect = w.toFloat() / max(1, h)
-            if (aspect in 0.60f..1.70f) out += Box(x0, y0, w, h, area, kind)
+            if (aspect in 0.55f..1.70f) out += Box(x0, y0, w, h, area, kind)
         }
         return out
     }
 
-    private fun close(mask: BooleanArray, w: Int, h: Int): BooleanArray = erode(dilate(mask, w, h), w, h)
+    private fun close(mask: BooleanArray, w: Int, h: Int, radius: Int): BooleanArray =
+        erode(dilate(mask, w, h, radius), w, h, radius)
 
-    private fun dilate(mask: BooleanArray, w: Int, h: Int): BooleanArray {
+    private fun dilate(mask: BooleanArray, w: Int, h: Int, radius: Int): BooleanArray {
         val out = BooleanArray(mask.size)
         for (y in 0 until h) {
-            val row = y * w
             for (x in 0 until w) {
-                if (!mask[row + x]) continue
-                for (dy in -1..1) {
+                if (!mask[y * w + x]) continue
+                for (dy in -radius..radius) {
                     val yy = y + dy
                     if (yy !in 0 until h) continue
-                    val r2 = yy * w
-                    for (dx in -1..1) {
+                    val row = yy * w
+                    for (dx in -radius..radius) {
                         val xx = x + dx
-                        if (xx in 0 until w) out[r2 + xx] = true
+                        if (xx in 0 until w) out[row + xx] = true
                     }
                 }
             }
@@ -289,19 +411,18 @@ object ColoredDiceReader {
         return out
     }
 
-    private fun erode(mask: BooleanArray, w: Int, h: Int): BooleanArray {
+    private fun erode(mask: BooleanArray, w: Int, h: Int, radius: Int): BooleanArray {
         val out = BooleanArray(mask.size)
-        for (y in 1 until h - 1) {
-            val row = y * w
-            for (x in 1 until w - 1) {
+        for (y in radius until h - radius) {
+            for (x in radius until w - radius) {
                 var ok = true
-                for (dy in -1..1) {
-                    val r2 = (y + dy) * w
-                    for (dx in -1..1) {
-                        if (!mask[r2 + x + dx]) ok = false
+                for (dy in -radius..radius) {
+                    val row = (y + dy) * w
+                    for (dx in -radius..radius) {
+                        if (!mask[row + x + dx]) ok = false
                     }
                 }
-                out[row + x] = ok
+                out[y * w + x] = ok
             }
         }
         return out
@@ -401,8 +522,31 @@ object ColoredDiceReader {
             val blobs = whiteBlobs(face, thr)
             if (blobs.isEmpty()) continue
             val big = blobs.maxOf { it.area }.coerceAtLeast(1)
-            val kept = blobs.filter { it.area >= 0.42f * big && it.aspect in 0.42f..2.4f && it.fill >= 0.42f }
-            val count = geometry(kept)
+            // Printed marks such as "49Y" are much smaller than a pip, so the size
+            // ratio drops them. A highlight on the rim is a different problem: it
+            // is bright enough to join the set and spoil a real face (the gold 3
+            // picks up the corner of the die). If the full set is not a legal
+            // face, try again with only the blobs that sit inside the face.
+            var kept = blobs.filter { it.area >= 0.42f * big && it.aspect in 0.42f..2.4f && it.fill >= 0.42f }
+            var count = geometry(kept)
+            if (count !in 1..6) {
+                val inner = kept.filter { it.nx in 0.12f..0.86f && it.ny in 0.12f..0.86f }
+                val innerCount = geometry(inner)
+                if (innerCount in 1..6) {
+                    kept = inner
+                    count = innerCount
+                }
+            }
+            // A real 3 on a translucent die often has one or two extra bright spots
+            // (the rim, or a pip showing through). Keep the three only when they are
+            // the single collinear triple in the set.
+            if (count !in 1..6 && kept.size in 4..6) {
+                val line = onlyCollinearTriple(kept)
+                if (line != null) {
+                    kept = line
+                    count = 3
+                }
+            }
             val ratio = if (kept.isEmpty()) 9f else kept.maxOf { it.area }.toFloat() / kept.minOf { it.area }.coerceAtLeast(1)
             val inset = kept.isNotEmpty() && kept.all { it.nx in 0.12f..0.86f && it.ny in 0.12f..0.86f }
             val low = whiteBlobs(face, thr - 22).map { it.area }.sortedDescending()
@@ -435,7 +579,7 @@ object ColoredDiceReader {
             val mx = max(r, max(g, b))
             mask[i] = mn >= thr && mx - mn < 78
         }
-        val opened = dilate(erode(mask, w, h), w, h)
+        val opened = dilate(erode(mask, w, h, 1), w, h, 1)
         val minArea = max(16, (0.003f * w * h).toInt())
         val seen = BooleanArray(opened.size)
         val stack = IntArray(opened.size)
@@ -490,6 +634,23 @@ object ColoredDiceReader {
             )
         }
         return out
+    }
+
+    /** Three pips of a 3, and only when no other triple in the set is also a 3. */
+    private fun onlyCollinearTriple(blobs: List<Blob>): List<Blob>? {
+        var found: List<Blob>? = null
+        val n = blobs.size
+        for (i in 0 until n) {
+            for (j in i + 1 until n) {
+                for (k in j + 1 until n) {
+                    val tri = listOf(blobs[i], blobs[j], blobs[k])
+                    if (geometry(tri) != 3) continue
+                    if (found != null) return null
+                    found = tri
+                }
+            }
+        }
+        return found
     }
 
     /** Snap blob centers to a legal 1–6 layout. Anything else is not a face. */

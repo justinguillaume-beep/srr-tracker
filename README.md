@@ -51,7 +51,7 @@ White pips are counted as round blobs of similar size inside the top face. A rea
 - `3643033e…` finds all six dice. The amber die reads **6**. The other faces are not reliable enough to log, including when the box is tightened around two of them.
 - `0cb28426…` finds all four dice. The amber die's bright edge is still counted with the pips, so that face is not logged.
 
-**Save each die crop** (on by default) stores a JPEG of every die next to the roll, so a wrong face can be sent back. The four table photos are in the unit tests. The app has not been run on a physical phone in this environment. Nothing is uploaded.
+**Save each die crop** (on by default) stores a JPEG of every die next to the roll, so a wrong face can be sent back. Two more table photos, taken after the phone was moved, are in the unit tests. Each has six dice (five purple, one gold). The gold die is found with the purple ones. On `5ec3a0f2…` that gold face reads **3**: the three pips sit on a diagonal, and a bright corner plus a second spot are not counted. On `d1e4f113…` the gold face reads **6**. Small printed text on that face is much smaller than a pip, so it is not counted. Several purple faces on those photos are glare, shadow, or cut off by the box, and those stay unread. The app has not been run on a physical phone in this environment. Nothing is uploaded.
 
 ---
 
