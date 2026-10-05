@@ -150,7 +150,9 @@ object ColoredDiceReader {
         val yScale = image.height.toFloat() / sh
         val purple = BooleanArray(sw * sh)
         val yellow = BooleanArray(sw * sh)
+        val yellowCore = BooleanArray(sw * sh)
         val red = BooleanArray(sw * sh)
+        val redCore = BooleanArray(sw * sh)
         for (i in purple.indices) {
             val r = small.red(i)
             val g = small.green(i)
@@ -160,17 +162,26 @@ object ColoredDiceReader {
             val pur = min(r, b) - g
             val yel = min(r, g) - b
             if (pur > 14 && mx in 50..239 && chroma > 12) purple[i] = true
-            else if (yel > 48 && mx > 90 && b < 165 && chroma > 40 && g > 80) yellow[i] = true
-            else if (redDie(r, g, b, chroma)) red[i] = true
+            else if (yel > 48 && mx > 90 && b < 165 && chroma > 40 && g > 80) {
+                // The cut stays at 48 so ivory (about 46) is not a die. Tan cloth
+                // can still cross 48, so a real gold die also has to have a brighter core.
+                yellow[i] = true
+                if (yel > 60) yellowCore[i] = true
+            } else if (redDie(r, g, b, chroma)) {
+                red[i] = true
+                // Tan patches can cross the red cut after the JPEG is decoded.
+                // A real red die still has a much stronger core.
+                if (r - max(g, b) > 64) redCore[i] = true
+            }
         }
         val boxes = ArrayList<Box>()
-        boxes += components(close(purple, sw, sh, 1), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f)
+        boxes += components(close(purple, sw, sh, 1), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, null)
         // Gold dice are translucent, so the yellow mask is full of pip holes.
         // A wider close joins those holes without lowering the yellow threshold.
-        boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, xScale, yScale, image.width, image.height, 0.27f)
+        boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, xScale, yScale, image.width, image.height, 0.27f, yellowCore)
         // Red/pink dice are translucent too. Close radius 2 fills pip holes
         // without pulling in the warm grey cloth (that stays under the margin).
-        boxes += components(close(red, sw, sh, 2), sw, sh, 'R', scale, xScale, yScale, image.width, image.height, 0.28f)
+        boxes += components(close(red, sw, sh, 2), sw, sh, 'R', scale, xScale, yScale, image.width, image.height, 0.28f, redCore)
         return dropSizeOutliers(dropContained(mergeSameColor(boxes)))
     }
 
@@ -206,7 +217,8 @@ object ColoredDiceReader {
         yScale: Float,
         fullW: Int,
         fullH: Int,
-        minFill: Float
+        minFill: Float,
+        core: BooleanArray?
     ): List<Box> {
         val minSide = (32f / scale).toInt().coerceIn(10, 48)
         val maxSide = (200f / scale).toInt().coerceIn(minSide + 8, 480)
@@ -246,7 +258,7 @@ object ColoredDiceReader {
             // Split that blob at its narrow waist. A blob we already accept is left whole.
             if ((bw > maxSide && bh in minSide..maxSide) || (bh > maxSide && bw in minSide..maxSide)) {
                 for (span in splitTouching(pix, area, w, bw > maxSide, minSide, maxSide)) {
-                    consider(out, span, kind, xScale, yScale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill)
+                    consider(out, span, kind, xScale, yScale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill, w, core)
                 }
                 continue
             }
@@ -255,6 +267,7 @@ object ColoredDiceReader {
             val aspect = bw.toFloat() / bh
             val fill = area.toFloat() / (bw * bh)
             if (aspect !in 0.55f..1.80f || fill < minFill) continue
+            if (!saturatedCore(core, pix, area)) continue
             out += toBox(minX, minY, maxX, maxY, area, kind, xScale, yScale, fullW, fullH)
         }
         return out
@@ -345,7 +358,9 @@ object ColoredDiceReader {
         maxSide: Int,
         minArea: Int,
         maxArea: Int,
-        minFill: Float
+        minFill: Float,
+        imageW: Int,
+        core: BooleanArray?
     ) {
         val bw = span.x1 - span.x0 + 1
         val bh = span.y1 - span.y0 + 1
@@ -354,7 +369,17 @@ object ColoredDiceReader {
         val aspect = bw.toFloat() / bh
         val fill = span.area.toFloat() / (bw * bh)
         if (aspect !in 0.55f..1.80f || fill < minFill) return
+        if (core != null && !spanHasCore(core, imageW, span)) return
         out += toBox(span.x0, span.y0, span.x1, span.y1, span.area, kind, xScale, yScale, fullW, fullH)
+    }
+
+    private fun spanHasCore(core: BooleanArray, imageW: Int, span: Span): Boolean {
+        var c = 0
+        for (y in span.y0..span.y1) {
+            val row = y * imageW
+            for (x in span.x0..span.x1) if (core[row + x]) c++
+        }
+        return c >= 8 && c * 10 >= span.area
     }
 
     private fun toBox(
@@ -374,6 +399,17 @@ object ColoredDiceReader {
         val r = ((maxX + 1) * xScale).roundToInt().coerceIn(x + 1, fullW)
         val b = ((maxY + 1) * yScale).roundToInt().coerceIn(y + 1, fullH)
         return Box(x, y, r - x, b - y, area, kind)
+    }
+
+    /**
+     * Gold and red dice are saturated. Tan clutter can cross the cut and then
+     * stop, so a kept die has to contain a brighter core of the same hue.
+     */
+    private fun saturatedCore(core: BooleanArray?, pix: IntArray, n: Int): Boolean {
+        if (core == null || n <= 0) return true
+        var c = 0
+        for (k in 0 until n) if (core[pix[k]]) c++
+        return c >= 8 && c * 10 >= n
     }
 
     /** A small blob whose center sits inside a larger die is a fringe, not a second die. */
@@ -588,10 +624,19 @@ object ColoredDiceReader {
     )
 
     private fun readBlobs(face: RgbImage): BlobFace {
+        val opened = readBlobsAt(face, 1)
+        if (opened.count in 1..6) return opened
+        // A fat glare streak can hide one pip of a 4. A wider open shrinks that
+        // streak onto the pip. A face that already read stays as it was.
+        val wider = readBlobsAt(face, 2)
+        return if (wider.count in 1..6) wider else opened
+    }
+
+    private fun readBlobsAt(face: RgbImage, openRadius: Int): BlobFace {
         var bestScore = -1e9f
         var best = BlobFace(0, false, 0f, emptyList())
         for (thr in intArrayOf(208, 222, 236)) {
-            val blobs = whiteBlobs(face, thr)
+            val blobs = whiteBlobs(face, thr, openRadius)
             if (blobs.isEmpty()) continue
             val big = blobs.maxOf { it.area }.coerceAtLeast(1)
             // Printed marks such as "49Y" are much smaller than a pip, so the size
@@ -621,7 +666,7 @@ object ColoredDiceReader {
             }
             val ratio = if (kept.isEmpty()) 9f else kept.maxOf { it.area }.toFloat() / kept.minOf { it.area }.coerceAtLeast(1)
             val inset = kept.isNotEmpty() && kept.all { it.nx in 0.12f..0.86f && it.ny in 0.12f..0.86f }
-            val low = whiteBlobs(face, thr - 22).map { it.area }.sortedDescending()
+            val low = whiteBlobs(face, thr - 22, openRadius).map { it.area }.sortedDescending()
             val runner = if (low.size >= 2) low[1].toFloat() / low[0].coerceAtLeast(1) else 0f
             val oneOk = if (count == 1 && kept.isNotEmpty()) {
                 val p = kept[0]
@@ -639,7 +684,7 @@ object ColoredDiceReader {
         return best
     }
 
-    private fun whiteBlobs(face: RgbImage, thr: Int): List<Blob> {
+    private fun whiteBlobs(face: RgbImage, thr: Int, openRadius: Int): List<Blob> {
         val w = face.width
         val h = face.height
         val mask = BooleanArray(w * h)
@@ -651,7 +696,7 @@ object ColoredDiceReader {
             val mx = max(r, max(g, b))
             mask[i] = mn >= thr && mx - mn < 78
         }
-        val opened = dilate(erode(mask, w, h, 1), w, h, 1)
+        val opened = dilate(erode(mask, w, h, openRadius), w, h, openRadius)
         val minArea = max(16, (0.003f * w * h).toInt())
         val seen = BooleanArray(opened.size)
         val stack = IntArray(opened.size)

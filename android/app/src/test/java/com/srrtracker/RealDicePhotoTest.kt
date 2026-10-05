@@ -23,8 +23,67 @@ import java.io.InputStream
  * On 5ec3a0f2 the gold face (lower left) is a diagonal 3 once extra bright spots are ignored.
  * On d1e4f113 the gold face reads 6. Other faces on those two photos are glare, shadow,
  * or a clipped box, so only the die count and those two gold reads are asserted.
+ * 5b225ec2… twelve dice, every top face 4 (see the sibling .label file).
  */
 class RealDicePhotoTest {
+    @Test
+    fun twelveFoursAreAllFoundAndReadAsFour() {
+        val stem = "5b225ec207de1be1e8fd2427919642fb0c7bc4b8630598af0a8f92a7eeffcce7"
+        val label = loadLabel("$stem.label")
+        assertEquals(4, label.face)
+        assertEquals(12, label.dice)
+        val det = ColoredDiceReader.read(load("$stem.jpg"))
+        val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+        println("TWELVE dice=${det.dice.size} ok=${det.ok} reason=${det.reason} boxes=$boxes")
+        println("  sizes ${ColoredDiceReader.lastSizeLog}")
+        assertEquals("found ${det.dice.size}: $boxes", label.dice, det.dice.size)
+        val matched = det.dice.count { it.count == label.face }
+        assertEquals("read as ${label.face}: $matched of ${det.dice.size} boxes=$boxes", label.dice, matched)
+    }
+
+    /**
+     * Writes one crop per detected die into dataset/face_N/. The face on each
+     * crop is the photo's label, not the reader's count. No-op unless
+     * DICE_DATASET is set, so a normal unit-test run does not touch the tree.
+     * Run dataset/extract_die_crops.sh.
+     */
+    @Test
+    fun extractsLabeledDieCrops() {
+        val root = System.getenv("DICE_DATASET") ?: return
+        val dataset = java.io.File(root)
+        for (face in 1..6) java.io.File(dataset, "face_$face").mkdirs()
+        val realDir = labeledPhotoDir()
+        val labels = realDir.listFiles { f -> f.isFile && f.name.endsWith(".label") }?.sortedBy { it.name }.orEmpty()
+        check(labels.isNotEmpty()) { "no .label files in ${realDir.absolutePath}" }
+        val rows = ArrayList<String>()
+        rows.add("path,face,source,x,y,w,h,read")
+        for (labelFile in labels) {
+            val stem = labelFile.name.removeSuffix(".label")
+            val label = loadLabel("$stem.label")
+            val image = load("$stem.jpg")
+            val det = ColoredDiceReader.read(image)
+            val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+            println("extract $stem label=${label.face} dice=${label.dice} found=${det.dice.size} $boxes")
+            check(det.dice.size == label.dice) {
+                "$stem label says ${label.dice} dice, detector found ${det.dice.size}: $boxes"
+            }
+            val faceDir = java.io.File(dataset, "face_${label.face}")
+            faceDir.mkdirs()
+            val prefix = stem.take(12)
+            faceDir.listFiles()?.forEach { old ->
+                if (old.name.startsWith("${prefix}_") && old.name.endsWith(".png")) old.delete()
+            }
+            det.dice.forEachIndexed { index, die ->
+                val pad = (maxOf(die.w, die.h) * 0.10f).toInt().coerceAtLeast(4)
+                val crop = ImageOps.crop(image, die.x - pad, die.y - pad, die.w + pad * 2, die.h + pad * 2)
+                val name = "${prefix}_${index.toString().padStart(2, '0')}.png"
+                writePng(crop, java.io.File(faceDir, name))
+                rows.add("face_${label.face}/$name,${label.face},$stem.jpg,${die.x},${die.y},${die.w},${die.h},${die.count}")
+            }
+        }
+        java.io.File(dataset, "labels.csv").writeText(rows.joinToString("\n") + "\n")
+    }
+
     @Test
     fun eachPhotoFindsTheRightNumberOfDiceAndIgnoresClutter() {
         val expect = linkedMapOf(
@@ -224,10 +283,64 @@ class RealDicePhotoTest {
         }
     }
 
+    private data class PhotoLabel(val face: Int, val dice: Int)
+
+    private fun loadLabel(name: String): PhotoLabel {
+        val text = javaClass.classLoader.getResourceAsStream("real/$name")?.bufferedReader()?.use { it.readText() }
+            ?: error("missing real/$name")
+        var face = -1
+        var dice = -1
+        for (raw in text.lineSequence()) {
+            val line = raw.substringBefore('#').trim()
+            if (line.isEmpty() || !line.contains('=')) continue
+            val key = line.substringBefore('=').trim()
+            val value = line.substringAfter('=').trim()
+            when (key) {
+                "face" -> face = value.toInt()
+                "dice" -> dice = value.toInt()
+            }
+        }
+        check(face in 1..6) { "$name face=$face" }
+        check(dice > 0) { "$name dice=$dice" }
+        return PhotoLabel(face, dice)
+    }
+
+    private fun labeledPhotoDir(): java.io.File {
+        val url = javaClass.classLoader.getResource("real/5b225ec207de1be1e8fd2427919642fb0c7bc4b8630598af0a8f92a7eeffcce7.label")
+            ?: error("missing labeled photo")
+        return java.io.File(url.toURI()).parentFile
+    }
+
     private fun load(name: String): RgbImage {
         val stream = javaClass.classLoader.getResourceAsStream("real/$name")
             ?: error("missing test photo real/$name")
         return decodeJpeg(stream)
+    }
+
+    /** Host tests have ImageIO; the Android compile stubs do not. */
+    private fun writePng(image: RgbImage, file: java.io.File) {
+        val biClass = Class.forName("java.awt.image.BufferedImage")
+        val type = biClass.getField("TYPE_INT_ARGB").get(null) as Int
+        val bi = biClass.getConstructor(
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType
+        ).newInstance(image.width, image.height, type)
+        biClass.getMethod(
+            "setRGB",
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+            IntArray::class.java,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType
+        ).invoke(bi, 0, 0, image.width, image.height, image.pixels, 0, image.width)
+        val rendered = Class.forName("java.awt.image.RenderedImage")
+        val wrote = Class.forName("javax.imageio.ImageIO")
+            .getMethod("write", rendered, String::class.java, java.io.File::class.java)
+            .invoke(null, bi, "png", file) as Boolean
+        check(wrote) { "could not write ${file.absolutePath}" }
     }
 
     /**
