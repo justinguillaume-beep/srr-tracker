@@ -76,9 +76,15 @@ class MotionGate(
     private val changeHot: Int
         get() = (minHot * 2).coerceAtLeast(180)
 
-    fun onFrame(gray: IntArray, nowMs: Long): FrameInfo {
+    /**
+     * [coloredDice] is how many colored dice the preview locator saw in the box.
+     * When it is passed, only a pair (exactly two) can arm a capture. Luminance
+     * contrast alone is not dice: the teal rail is darker than the cloth and
+     * used to look like a subject. Unit tests omit it and keep the luminance gate.
+     */
+    fun onFrame(gray: IntArray, nowMs: Long, coloredDice: Int? = null): FrameInfo {
         require(gray.size == W * H)
-        val present = diceInBox(gray)
+        val present = if (coloredDice != null) coloredDice == 2 else diceInBox(gray)
         val moving = if (!hasPrev) false else hotCount(prev, gray) >= minHot
         var capture = false
         var roi: NormRect? = null
@@ -288,7 +294,68 @@ class MotionGate(
                 if (abs(gray[row + xx] - bg) > 34) hot++
             }
         }
-        return hot in 60..(area / 3)
+        if (hot !in 60..(area / 3)) return false
+        // A rail or a cloth wrinkle can pass the pixel count. A die is a compact
+        // blob, not a band that runs across the box.
+        return compactSubjects(gray, x0, x1, y0, y1, bg) > 0
+    }
+
+    private fun compactSubjects(gray: IntArray, x0: Int, x1: Int, y0: Int, y1: Int, bg: Int): Int {
+        val rw = x1 - x0
+        val rh = y1 - y0
+        if (rw < 8 || rh < 8) return 0
+        val mask = BooleanArray(rw * rh)
+        for (yy in y0 until y1) {
+            val src = yy * W
+            val row = (yy - y0) * rw
+            for (xx in x0 until x1) {
+                if (abs(gray[src + xx] - bg) > 34) mask[row + (xx - x0)] = true
+            }
+        }
+        val seen = BooleanArray(mask.size)
+        val stack = IntArray(mask.size)
+        var dice = 0
+        for (start in mask.indices) {
+            if (!mask[start] || seen[start]) continue
+            var sp = 0
+            stack[sp++] = start
+            seen[start] = true
+            var area = 0
+            var minX = rw
+            var minY = rh
+            var maxX = 0
+            var maxY = 0
+            while (sp > 0) {
+                val i = stack[--sp]
+                val x = i % rw
+                val y = i / rw
+                area++
+                if (x < minX) minX = x
+                if (y < minY) minY = y
+                if (x > maxX) maxX = x
+                if (y > maxY) maxY = y
+                if (x > 0) sp = push(mask, seen, stack, sp, i - 1)
+                if (x + 1 < rw) sp = push(mask, seen, stack, sp, i + 1)
+                if (y > 0) sp = push(mask, seen, stack, sp, i - rw)
+                if (y + 1 < rh) sp = push(mask, seen, stack, sp, i + rw)
+            }
+            val bw = maxX - minX + 1
+            val bh = maxY - minY + 1
+            if (bw < 8 || bh < 8) continue
+            val aspect = bw.toFloat() / bh
+            if (aspect !in 0.45f..2.2f) continue
+            if (area.toFloat() / (bw * bh) < 0.35f) continue
+            if (bw > rw * 0.72f || bh > rh * 0.72f) continue
+            dice++
+        }
+        return dice
+    }
+
+    private fun push(mask: BooleanArray, seen: BooleanArray, stack: IntArray, sp: Int, i: Int): Int {
+        if (seen[i] || !mask[i]) return sp
+        seen[i] = true
+        stack[sp] = i
+        return sp + 1
     }
 
     private fun stageFor(capture: Boolean, present: Boolean, nowMs: Long): Stage {

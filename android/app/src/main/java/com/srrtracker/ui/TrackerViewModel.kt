@@ -15,6 +15,7 @@ import com.srrtracker.data.PhotoStore
 import com.srrtracker.data.RollEntity
 import com.srrtracker.data.Session
 import com.srrtracker.detect.CameraBox
+import com.srrtracker.detect.CaptureDecision
 import com.srrtracker.detect.ColoredDiceReader
 import com.srrtracker.detect.DebugMarks
 import com.srrtracker.detect.DiceDetector
@@ -237,11 +238,6 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 "preview view ${shot.previewViewW}x${shot.previewViewH} stream ${shot.previewStream} " +
                 "present=${shot.dicePresent} ${shot.framingNote}"
         )
-        if (_ui.value.saveAllCaptures) {
-            viewModelScope.launch(Dispatchers.IO) {
-                saveJpegToDownloads(jpeg, "still-${System.currentTimeMillis()}.jpg")
-            }
-        }
         val state = _ui.value
         if (!state.running || state.pending != null) {
             Log.w(TAG, "photo dropped running=${state.running} pending=${state.pending != null}")
@@ -276,7 +272,22 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                     publishLiveStatus()
                     return@launch
                 }
-                val solid = det != null && det.ok && det.confidence == "high" && det.d1 != null && det.d2 != null
+                val boxes = CaptureDecision.dieBoxes(det)
+                if (boxes == 0) {
+                    Log.i(TAG, "no dice in the still, discarded")
+                    _ui.update { it.copy(busy = false, manualCapture = false, diePx = null) }
+                    publishLiveStatus()
+                    return@launch
+                }
+                if (_ui.value.saveAllCaptures) {
+                    viewModelScope.launch(Dispatchers.IO) {
+                        saveJpegToDownloads(jpeg, "still-${System.currentTimeMillis()}.jpg")
+                    }
+                }
+                val leftFace = det?.d1
+                val rightFace = det?.d2
+                val solid = boxes == 2 && det != null && det.ok && det.confidence == "high" &&
+                    leftFace != null && rightFace != null && leftFace in 1..6 && rightFace in 1..6
                 if (solid) {
                     val saved = saveRoll(det!!.d1!!, det.d2!!, jpeg, image, det, userChanged = false, unread = false, reason = null)
                     if (saved <= 0) {
@@ -289,13 +300,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                     val reason = readFailureReason(det, shot, px)
                     feedback.onUnread(_ui.value.soundOn)
                     val rollId = saveRoll(0, 0, jpeg, image, det, userChanged = false, unread = true, reason = reason)
+                    val (face1, face2) = CaptureDecision.pickerFaces(det)
                     openedCheck = true
                     _ui.update {
                         it.copy(
                             status = "Could not read the dice. $reason",
                             statusIsSeven = false,
                             busy = false,
-                            pending = PendingCheck(jpeg, det?.d1, det?.d2, det, reason, rollId)
+                            pending = PendingCheck(jpeg, face1, face2, det, reason, rollId)
                         )
                     }
                 }
@@ -620,7 +632,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 val rolls = db.rolls().list(session.id)
                 SrrStats.CsvSession(
                     name = session.name,
-                    rolls = rolls.filter { !it.unread }.map { r ->
+                    rolls = rolls.filter { CaptureDecision.countsAsRoll(it.d1, it.d2, it.unread) }.map { r ->
                         SrrStats.CsvRoll(
                             ts = r.ts,
                             d1 = r.d1,
@@ -812,20 +824,21 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun applyRolls(list: List<RollEntity>) {
         currentRolls = list
-        val counted = list.filter { !it.unread }
+        val counted = list.filter { CaptureDecision.countsAsRoll(it.d1, it.d2, it.unread) }
         val totals = counted.map { it.total }
         val running = SrrStats.running(totals)
         val ratioById = counted.mapIndexed { i, roll -> roll.id to running[i].ratio }.toMap()
         val sum = SrrStats.summary(totals)
         val rows = list.indices.reversed().map { i ->
             val roll = list[i]
+            val live = CaptureDecision.countsAsRoll(roll.d1, roll.d2, roll.unread)
             RollRow(
                 id = roll.id,
                 number = i + 1,
                 total = roll.total,
-                ratio = if (roll.unread) "—" else ratioById[roll.id] ?: "—",
-                isSeven = !roll.unread && roll.total == 7,
-                unread = roll.unread,
+                ratio = if (!live) "—" else ratioById[roll.id] ?: "—",
+                isSeven = live && roll.total == 7,
+                unread = !live,
                 reason = roll.readReason
             )
         }

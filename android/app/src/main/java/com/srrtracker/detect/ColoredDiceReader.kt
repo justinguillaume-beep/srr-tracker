@@ -27,6 +27,35 @@ object ColoredDiceReader {
      */
     var lastSizeLog: String = ""
 
+    /**
+     * How many colored dice [locate] sees. Used to decide whether a frame is a
+     * throw at all. Teal cloth and a grey table are not dice.
+     */
+    fun diceCount(image: RgbImage, roi: NormRect? = null): Int {
+        val bounds = pixelRoi(image, roi)
+        var work = if (bounds.x == 0 && bounds.y == 0 && bounds.w == image.width && bounds.h == image.height) {
+            image
+        } else {
+            ImageOps.crop(image, bounds.x, bounds.y, bounds.w, bounds.h)
+        }
+        val longSide = max(work.width, work.height)
+        if (longSide < 720) {
+            val factor = when {
+                longSide < 280 -> 3
+                longSide < 520 -> 2
+                else -> 1
+            }
+            if (factor != 1) {
+                work = ImageOps.scale(
+                    work,
+                    (work.width * factor).coerceAtLeast(1),
+                    (work.height * factor).coerceAtLeast(1)
+                )
+            }
+        }
+        return locate(work).size
+    }
+
     fun read(image: RgbImage, roi: NormRect? = null): DiceDetector.Detection {
         lastSizeLog = ""
         val t0 = System.nanoTime()

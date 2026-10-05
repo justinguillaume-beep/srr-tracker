@@ -386,15 +386,27 @@ private fun CheckScreen(vm: TrackerViewModel, pending: PendingCheck, notice: Str
         if (!notice.isNullOrBlank()) Text(notice, color = Good, fontSize = 16.sp)
         DiePicker("Left die", pending.d1) { vm.pickPending(0, it) }
         DiePicker("Right die", pending.d2) { vm.pickPending(1, it) }
-        val total = if (pending.d1 != null && pending.d2 != null) pending.d1 + pending.d2 else null
-        Text(
-            total?.toString() ?: "?",
-            color = if (total == 7) Seven else Ink,
-            fontSize = 56.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center
-        )
+        val face1 = pending.d1
+        val face2 = pending.d2
+        val total = if (face1 != null && face2 != null && face1 in 1..6 && face2 in 1..6) face1 + face2 else null
+        if (total == null) {
+            Text(
+                "Pick both dice",
+                color = Muted,
+                fontSize = 18.sp,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        } else {
+            Text(
+                total.toString(),
+                color = if (total == 7) Seven else Ink,
+                fontSize = 56.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        }
         BigButton("Share last photo", { vm.sharePending() }, Modifier.fillMaxWidth(), primary = false)
         BigButton("Save full-resolution still", { vm.savePendingToDownloads() }, Modifier.fillMaxWidth(), primary = false)
         BigButton("Save roll", { vm.savePending() }, Modifier.fillMaxWidth(), enabled = total != null)
@@ -493,16 +505,27 @@ private fun DetailScreen(vm: TrackerViewModel, state: UiState) {
             Text(roll.readReason ?: "Could not read the dice.", color = Color(0xFFFFC107), fontSize = 18.sp)
         }
         Text("Tap a number to fix a die.", color = Muted, fontSize = 16.sp)
-        DiePicker("Left die", roll.d1) { vm.correctDetail(0, it) }
-        DiePicker("Right die", roll.d2) { vm.correctDetail(1, it) }
-        Text(
-            "${roll.total}",
-            color = if (roll.total == 7) Seven else Ink,
-            fontSize = 56.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center
-        )
+        DiePicker("Left die", roll.d1.takeIf { it in 1..6 }) { vm.correctDetail(0, it) }
+        DiePicker("Right die", roll.d2.takeIf { it in 1..6 }) { vm.correctDetail(1, it) }
+        val pair = roll.d1 in 1..6 && roll.d2 in 1..6 && !roll.unread
+        if (!pair) {
+            Text(
+                "Pick both dice",
+                color = Muted,
+                fontSize = 18.sp,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        } else {
+            Text(
+                "${roll.total}",
+                color = if (roll.total == 7) Seven else Ink,
+                fontSize = 56.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        }
         if (!state.notice.isNullOrBlank()) Text(state.notice, color = Good, fontSize = 16.sp)
         BigButton("Share last photo", { vm.shareDetailPhoto() }, Modifier.fillMaxWidth(), primary = false, enabled = roll.photoPath != null)
         BigButton("Save full-resolution still", { vm.saveDetailToDownloads() }, Modifier.fillMaxWidth(), primary = false, enabled = roll.photoPath != null)

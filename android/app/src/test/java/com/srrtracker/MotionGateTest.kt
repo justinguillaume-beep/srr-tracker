@@ -211,6 +211,42 @@ class MotionGateTest {
     }
 
     @Test
+    fun aTealRailAcrossTheBoxIsNotDice() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 200)
+        gate.running = true
+        val cloth = felt()
+        val x0 = (gate.frame.left * w).toInt()
+        val x1 = (gate.frame.right * w).toInt()
+        val y0 = (gate.frame.top * h).toInt()
+        val y1 = (gate.frame.bottom * h).toInt()
+        for (y in (y1 - 36) until y1) {
+            for (x in x0 until x1) cloth[y * w + x] = 20
+        }
+        assertFalse("a rail is darker than the cloth but it is not a die", gate.diceInBox(cloth))
+        gate.onFrame(felt(), 0)
+        gate.onFrame(cloth, 40)
+        gate.onFrame(cloth, 80)
+        assertFalse(gate.onFrame(cloth, 80 + 200).shouldCapture)
+    }
+
+    @Test
+    fun colorCountOverridesABrightPatchThatIsNotTwoDice() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 200)
+        gate.running = true
+        val patch = felt().also { stamp(it, w / 2, h / 2, 10, 230) }
+        gate.onFrame(felt(), 0, coloredDice = 0)
+        gate.onFrame(patch, 40, coloredDice = 0)
+        gate.onFrame(patch, 80, coloredDice = 0)
+        assertFalse(gate.onFrame(patch, 80 + 200, coloredDice = 0).shouldCapture)
+
+        val armed = MotionGate(sensitivity = 50, settleMs = 200)
+        armed.running = true
+        armed.onFrame(felt(), 0, coloredDice = 2)
+        armed.onFrame(felt(), 40, coloredDice = 2)
+        assertTrue(armed.onFrame(felt(), 40 + 200, coloredDice = 2).shouldCapture)
+    }
+
+    @Test
     fun aFailedCaptureTriesAgainWhileTheDiceStayStill() {
         val gate = MotionGate(sensitivity = 50, settleMs = 300)
         gate.running = true

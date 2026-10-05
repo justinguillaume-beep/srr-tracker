@@ -27,6 +27,7 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.srrtracker.detect.CaptureFraming
+import com.srrtracker.detect.ColoredDiceReader
 import com.srrtracker.detect.MotionGate
 import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.RgbImage
@@ -215,7 +216,8 @@ class AutoCapture(
                 }
             }
             val gray = toMotionGray(image)
-            val info = gate.onFrame(gray, now)
+            val colored = if (gate.running) coloredDice(image, gate.frame) else 0
+            val info = gate.onFrame(gray, now, if (gate.running) colored else null)
             val manual = force.get()
             main.post { if (!stopped) onFrame(info) }
             if (!info.shouldCapture && !manual) return
@@ -237,7 +239,7 @@ class AutoCapture(
                 main.post { if (!stopped) onError("Camera is not ready to take a photo.") }
                 return
             }
-            Log.i(TAG, "taking photo manual=$manual present=${info.diceInBox} ${info.detail}")
+            Log.i(TAG, "taking photo manual=$manual present=${info.diceInBox} colored=$colored ${info.detail}")
             val gen = acquired
             main.post {
                 if (stopped) {
@@ -303,7 +305,8 @@ class AutoCapture(
                         val rawH = upright.height
                         val framed = frameStill(upright, photo, viewW, viewH, roi)
                         val rgb = framed.bitmap.toRgbImage()
-                        val present = gate.subjectIn(stillGray(rgb), framed.roi ?: NormRect(0f, 0f, 1f, 1f))
+                        val dice = ColoredDiceReader.diceCount(rgb, framed.roi)
+                        val present = dice == 2
                         Log.i(
                             TAG,
                             "still try $attempt ${rgb.width}x${rgb.height} raw ${rawW}x${rawH} " +
@@ -311,7 +314,9 @@ class AutoCapture(
                                 "proxy ${photo.width}x${photo.height} rot=${photo.imageInfo.rotationDegrees} " +
                                 "crop=${photo.cropRect} present=$present ${framed.note}"
                         )
-                        if (!present && attempt < MAX_TRIES) {
+                        // An empty table stays empty. Do not burn extra frames on it.
+                        // A partial read can be a blur, so try the still again.
+                        if (!present && dice > 0 && attempt < MAX_TRIES) {
                             if (!framed.bitmap.isRecycled) framed.bitmap.recycle()
                             Log.i(TAG, "saved frame has no dice, taking another")
                             closed = true
@@ -442,18 +447,93 @@ class AutoCapture(
         return cropped
     }
 
-    private fun stillGray(image: RgbImage): IntArray {
-        val out = IntArray(MotionGate.W * MotionGate.H)
-        for (oy in 0 until MotionGate.H) {
-            val sy = (oy * image.height / MotionGate.H).coerceIn(0, image.height - 1)
-            val row = oy * MotionGate.W
-            for (ox in 0 until MotionGate.W) {
-                val sx = (ox * image.width / MotionGate.W).coerceIn(0, image.width - 1)
-                val i = sy * image.width + sx
-                out[row + ox] = (image.red(i) * 30 + image.green(i) * 59 + image.blue(i) * 11) / 100
+    /**
+     * Colored dice inside the upright preview box. The teal rail and grey cloth
+     * are the wrong hue, so an empty table counts as zero and does not capture.
+     * A failure counts as zero too: no dice, no shutter.
+     */
+    private fun coloredDice(image: ImageProxy, roi: NormRect): Int {
+        val rgb = uprightBox(image, roi) ?: return 0
+        return try {
+            ColoredDiceReader.diceCount(rgb)
+        } catch (t: Throwable) {
+            Log.w(TAG, "preview dice count failed", t)
+            0
+        }
+    }
+
+    private fun uprightBox(image: ImageProxy, roi: NormRect): RgbImage? {
+        if (image.planes.size < 3) return null
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuf = yPlane.buffer.duplicate()
+        val uBuf = uPlane.buffer.duplicate()
+        val vBuf = vPlane.buffer.duplicate()
+        val yPos = yBuf.position()
+        val uPos = uBuf.position()
+        val vPos = vBuf.position()
+        val rot = image.imageInfo.rotationDegrees
+        val srcW = image.width
+        val srcH = image.height
+        val upW = if (rot == 90 || rot == 270) srcH else srcW
+        val upH = if (rot == 90 || rot == 270) srcW else srcH
+        if (upW < 2 || upH < 2) return null
+        val x0 = (roi.left * upW).toInt().coerceIn(0, upW - 1)
+        val y0 = (roi.top * upH).toInt().coerceIn(0, upH - 1)
+        val x1 = (roi.right * upW).toInt().coerceIn(x0 + 1, upW)
+        val y1 = (roi.bottom * upH).toInt().coerceIn(y0 + 1, upH)
+        val bw = x1 - x0
+        val bh = y1 - y0
+        val step = max(1, max(bw, bh) / 480)
+        val ow = max(1, bw / step)
+        val oh = max(1, bh / step)
+        val pixels = IntArray(ow * oh)
+        for (oy in 0 until oh) {
+            val uy = (y0 + oy * step).coerceIn(0, upH - 1)
+            val row = oy * ow
+            for (ox in 0 until ow) {
+                val ux = (x0 + ox * step).coerceIn(0, upW - 1)
+                val sx: Int
+                val sy: Int
+                when (rot) {
+                    90 -> {
+                        sx = uy
+                        sy = upW - 1 - ux
+                    }
+                    180 -> {
+                        sx = upW - 1 - ux
+                        sy = upH - 1 - uy
+                    }
+                    270 -> {
+                        sx = srcW - 1 - uy
+                        sy = ux
+                    }
+                    else -> {
+                        sx = ux
+                        sy = uy
+                    }
+                }
+                val ssx = sx.coerceIn(0, srcW - 1)
+                val ssy = sy.coerceIn(0, srcH - 1)
+                val yIndex = yPos + ssy * yPlane.rowStride + ssx * yPlane.pixelStride.coerceAtLeast(1)
+                val cx = ssx / 2
+                val cy = ssy / 2
+                val uIndex = uPos + cy * uPlane.rowStride + cx * uPlane.pixelStride.coerceAtLeast(1)
+                val vIndex = vPos + cy * vPlane.rowStride + cx * vPlane.pixelStride.coerceAtLeast(1)
+                val y = if (yIndex in 0 until yBuf.limit()) yBuf.get(yIndex).toInt() and 0xFF else 0
+                val u = if (uIndex in 0 until uBuf.limit()) uBuf.get(uIndex).toInt() and 0xFF else 128
+                val v = if (vIndex in 0 until vBuf.limit()) vBuf.get(vIndex).toInt() and 0xFF else 128
+                val c = y - 16
+                val d = u - 128
+                val e = v - 128
+                val r = ((298 * c + 409 * e + 128) shr 8).coerceIn(0, 255)
+                val g = ((298 * c - 100 * d - 208 * e + 128) shr 8).coerceIn(0, 255)
+                val b = ((298 * c + 516 * d + 128) shr 8).coerceIn(0, 255)
+                pixels[row + ox] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
-        return out
+        return RgbImage(ow, oh, pixels)
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
