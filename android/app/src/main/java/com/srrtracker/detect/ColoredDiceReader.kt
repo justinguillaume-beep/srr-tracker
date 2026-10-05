@@ -755,6 +755,8 @@ object ColoredDiceReader {
     private fun readBlobsAt(face: RgbImage, openRadius: Int): BlobFace {
         var bestScore = -1e9f
         var best = BlobFace(0, false, 0f, emptyList())
+        var threeScore = -1e9f
+        var three: BlobFace? = null
         for (thr in intArrayOf(208, 222, 236)) {
             val blobs = whiteBlobs(face, thr, openRadius)
             if (blobs.isEmpty()) continue
@@ -796,11 +798,20 @@ object ColoredDiceReader {
             }
             val clear = count in 1..6 && ratio <= 1.28f && inset && (count != 1 || oneOk)
             val score = (if (count in 1..6) 80f else 0f) + (if (clear) 30f else 0f) + thr / 10f - ratio * 8f
+            val faceRead = BlobFace(count, clear, if (clear) (1f / ratio) else 0f, kept.map { it.nx to it.ny })
             if (score > bestScore) {
                 bestScore = score
-                best = BlobFace(count, clear, if (clear) (1f / ratio) else 0f, kept.map { it.nx to it.ny })
+                best = faceRead
+            }
+            // A low threshold can drop the end pip of a three and leave a clear
+            // pair. The three is the same pips plus one near the rim, so it is
+            // not marked clear and would otherwise lose to that pair.
+            if (count == 3 && ratio <= 1.28f && score > threeScore) {
+                threeScore = score
+                three = faceRead
             }
         }
+        if (best.count == 2 && three != null) return three
         return best
     }
 
