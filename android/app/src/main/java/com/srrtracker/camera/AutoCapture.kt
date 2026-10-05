@@ -2,12 +2,14 @@ package com.srrtracker.camera
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.RectF
+import android.hardware.camera2.CameraCharacteristics
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.util.Rational
 import android.util.Size
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -22,12 +24,9 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.camera.view.TransformExperimental
-import androidx.camera.view.transform.CoordinateTransform
-import androidx.camera.view.transform.ImageProxyTransformFactory
-import androidx.camera.view.transform.OutputTransform
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.srrtracker.detect.CaptureFraming
 import com.srrtracker.detect.MotionGate
 import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.RgbImage
@@ -52,14 +51,16 @@ class StillCapture(
     val previewViewH: Int,
     val previewStream: String,
     val rawW: Int,
-    val rawH: Int
+    val rawH: Int,
+    val dicePresent: Boolean,
+    val framingNote: String
 )
 
 /**
  * Rear camera, mounted face-down. Preview frames drive the motion gate.
  * When the dice settle, a full-resolution still is taken for pip counting.
  */
-@OptIn(TransformExperimental::class)
+@OptIn(ExperimentalCamera2Interop::class)
 class AutoCapture(
     private val context: Context,
     private val onFrame: (MotionGate.FrameInfo) -> Unit,
@@ -76,6 +77,7 @@ class AutoCapture(
     private var previewUse: Preview? = null
     private var previewView: PreviewView? = null
     private var camera: Camera? = null
+    private var activeLong = 0
     private val busy = AtomicBoolean(false)
     private val force = AtomicBoolean(false)
     private val captureGen = AtomicInteger(0)
@@ -190,6 +192,7 @@ class AutoCapture(
         }
         val bound = cameraProvider.bindToLifecycle(owner, selector, group)
         camera = bound
+        activeLong = sensorLongSide(bound)
         applyZoom()
         bound.cameraInfo.zoomState.observe(owner) { zs ->
             onZoomRange(zs.minZoomRatio, zs.maxZoomRatio)
@@ -244,17 +247,11 @@ class AutoCapture(
                 val view = previewView
                 val viewW = view?.width ?: 0
                 val viewH = view?.height ?: 0
-                val viewTransform = try {
-                    view?.outputTransform
-                } catch (t: Throwable) {
-                    Log.w(TAG, "preview transform unavailable", t)
-                    null
-                }
                 val stream = previewUse?.resolutionInfo?.resolution
                 val streamLabel = if (stream == null) "unknown" else "${stream.width}x${stream.height}"
                 try {
                     analysisExecutor.execute {
-                        takeStill(capture, gen, roi, viewW, viewH, streamLabel, viewTransform)
+                        takeStill(capture, gen, roi, viewW, viewH, streamLabel, attempt = 1)
                     }
                 } catch (t: Throwable) {
                     finishCapture(gen)
@@ -282,46 +279,71 @@ class AutoCapture(
         viewW: Int,
         viewH: Int,
         streamLabel: String,
-        viewTransform: OutputTransform?
+        attempt: Int
     ) {
         if (stopped) {
             finishCapture(gen)
             return
         }
+        busySince = System.currentTimeMillis()
         try {
             capture.takePicture(analysisExecutor, object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(photo: ImageProxy) {
-                    if (!finishCapture(gen)) {
-                        photo.close()
-                        Log.w(TAG, "late photo ignored")
-                        return
-                    }
+                    var closed = false
                     try {
+                        if (activeGen.get() != gen) {
+                            Log.w(TAG, "late photo ignored")
+                            return
+                        }
                         val buffer = photo.planes[0].buffer
                         val bytes = ByteArray(buffer.remaining())
                         buffer.get(bytes)
-                        val upright = uprightBitmap(bytes, photo.imageInfo.rotationDegrees)
+                        val upright = uprightBitmap(bytes, photo.imageInfo.rotationDegrees, viewW, viewH)
                         val rawW = upright.width
                         val rawH = upright.height
-                        val framed = frameStill(upright, photo, viewW, viewH, viewTransform, roi)
+                        val framed = frameStill(upright, photo, viewW, viewH, roi)
                         val rgb = framed.bitmap.toRgbImage()
-                        val jpeg = fullJpeg(framed.bitmap)
-                        if (!framed.bitmap.isRecycled) framed.bitmap.recycle()
+                        val present = gate.subjectIn(stillGray(rgb), framed.roi ?: NormRect(0f, 0f, 1f, 1f))
                         Log.i(
                             TAG,
-                            "still ${rgb.width}x${rgb.height} raw ${rawW}x${rawH} " +
+                            "still try $attempt ${rgb.width}x${rgb.height} raw ${rawW}x${rawH} " +
                                 "preview view ${viewW}x${viewH} stream $streamLabel " +
                                 "proxy ${photo.width}x${photo.height} rot=${photo.imageInfo.rotationDegrees} " +
-                                "crop=${photo.cropRect} roi=${framed.roi} mapped=${framed.mapped}"
+                                "crop=${photo.cropRect} present=$present ${framed.note}"
                         )
-                        val shot = StillCapture(rgb, jpeg, framed.roi, viewW, viewH, streamLabel, rawW, rawH)
+                        if (!present && attempt < MAX_TRIES) {
+                            if (!framed.bitmap.isRecycled) framed.bitmap.recycle()
+                            Log.i(TAG, "saved frame has no dice, taking another")
+                            closed = true
+                            photo.close()
+                            takeStill(capture, gen, roi, viewW, viewH, streamLabel, attempt + 1)
+                            return
+                        }
+                        if (!finishCapture(gen)) {
+                            if (!framed.bitmap.isRecycled) framed.bitmap.recycle()
+                            Log.w(TAG, "late photo ignored")
+                            return
+                        }
+                        val jpeg = fullJpeg(framed.bitmap)
+                        if (!framed.bitmap.isRecycled) framed.bitmap.recycle()
+                        val note = framed.note + if (present) "" else " No dice in the saved frame after $attempt tries."
+                        val shot = StillCapture(
+                            rgb, jpeg, framed.roi, viewW, viewH, streamLabel, rawW, rawH, present, note
+                        )
                         main.post { if (!stopped) onStill(shot) }
                     } catch (t: Throwable) {
-                        Log.e(TAG, "photo decode failed", t)
-                        gate.recheckSoon()
-                        main.post { if (!stopped) onError(t.message ?: "Could not read the photo.") }
+                        if (finishCapture(gen)) {
+                            Log.e(TAG, "photo decode failed", t)
+                            gate.recheckSoon()
+                            main.post { if (!stopped) onError(t.message ?: "Could not read the photo.") }
+                        }
                     } finally {
-                        photo.close()
+                        if (!closed) {
+                            try {
+                                photo.close()
+                            } catch (_: Throwable) {
+                            }
+                        }
                     }
                 }
 
@@ -340,122 +362,146 @@ class AutoCapture(
         }
     }
 
-    private class Framed(val bitmap: Bitmap, val roi: NormRect?, val mapped: Boolean)
+    private class Framed(val bitmap: Bitmap, val roi: NormRect?, val note: String)
 
     /**
-     * Crop the upright still to the preview's field of view when the still is
-     * wider than the live picture, and map the on-screen box into that crop.
+     * Keep the preview's field of view. A JPEG that already matches that view
+     * is not cropped again. A full-sensor JPEG is center-cropped for zoom and
+     * aspect, so a die in the preview stays in the still.
      */
     private fun frameStill(
         bitmap: Bitmap,
         photo: ImageProxy,
         viewW: Int,
         viewH: Int,
-        viewTransform: OutputTransform?,
         roi: NormRect?
     ): Framed {
-        if (viewTransform != null && viewW > 1 && viewH > 1 && roi != null) {
-            try {
-                val factory = ImageProxyTransformFactory()
-                factory.setUsingCropRect(true)
-                factory.setUsingRotationDegrees(true)
-                val imageTransform = factory.getOutputTransform(photo)
-                val transform = CoordinateTransform(viewTransform, imageTransform)
-                val viewRect = RectF(0f, 0f, viewW.toFloat(), viewH.toFloat()).also { transform.mapRect(it) }.normalized()
-                val roiRect = RectF(
-                    roi.left * viewW,
-                    roi.top * viewH,
-                    roi.right * viewW,
-                    roi.bottom * viewH
-                ).also { transform.mapRect(it) }.normalized()
-                val viewAspect = viewW.toFloat() / viewH
-                val mapAspect = viewRect.width() / viewRect.height().coerceAtLeast(1f)
-                val aspectOk = abs(viewAspect - mapAspect) / viewAspect < 0.35f
-                val usable = aspectOk && viewRect.width() > 32f && viewRect.height() > 32f &&
-                    viewRect.left < bitmap.width && viewRect.top < bitmap.height
-                if (usable) {
-                    val covers = viewRect.width() >= bitmap.width * 0.92f && viewRect.height() >= bitmap.height * 0.92f
-                    val cropped = if (covers) bitmap else cropBitmap(bitmap, viewRect)
-                    val originX = if (covers) 0f else viewRect.left.coerceAtLeast(0f)
-                    val originY = if (covers) 0f else viewRect.top.coerceAtLeast(0f)
-                    val mapped = NormRect(
-                        left = ((roiRect.left - originX) / cropped.width).coerceIn(0f, 0.98f),
-                        top = ((roiRect.top - originY) / cropped.height).coerceIn(0f, 0.98f),
-                        right = ((roiRect.right - originX) / cropped.width).coerceIn(0.02f, 1f),
-                        bottom = ((roiRect.bottom - originY) / cropped.height).coerceIn(0.02f, 1f)
-                    ).sorted()
-                    return Framed(cropped, mapped, true)
-                }
-                Log.w(TAG, "preview map missed the still view=$viewRect bitmap=${bitmap.width}x${bitmap.height}")
-            } catch (t: Throwable) {
-                Log.w(TAG, "preview map failed", t)
-            }
+        val box = roi ?: NormRect(0f, 0f, 1f, 1f)
+        val degrees = rotationUsed(bitmap, photo, viewW, viewH)
+        val sensorW = photo.width
+        val sensorH = photo.height
+        val (upW, upH) = CaptureFraming.uprightSize(sensorW, sensorH, degrees)
+        val rect = photo.cropRect
+        val rotated = CaptureFraming.rotateRect(rect.left, rect.top, rect.width(), rect.height(), sensorW, sensorH, degrees)
+        val bitmapIsFull = bitmap.width >= upW - 2 && bitmap.height >= upH - 2
+        val longSide = max(bitmap.width, bitmap.height)
+        val fullSensor = activeLong > 0 && longSide >= (activeLong * 0.92f).toInt()
+        val zoomForMath = if (bitmapIsFull && fullSensor) zoomRatio else 1f
+        val sensorCrop = if (bitmapIsFull) {
+            CaptureFraming.Px(0, 0, bitmap.width, bitmap.height)
+        } else {
+            rotated
         }
-        val cropped = centerCropToPreview(bitmap, viewW, viewH)
-        return Framed(cropped, roi, false)
+        val uprightW = if (bitmapIsFull) bitmap.width else upW
+        val uprightH = if (bitmapIsFull) bitmap.height else upH
+        val framed = CaptureFraming.frame(
+            bitmapW = bitmap.width,
+            bitmapH = bitmap.height,
+            sensorCrop = if (bitmapIsFull) sensorCrop else CaptureFraming.Px(0, 0, bitmap.width, bitmap.height),
+            uprightW = if (bitmapIsFull) uprightW else bitmap.width,
+            uprightH = if (bitmapIsFull) uprightH else bitmap.height,
+            viewW = viewW.coerceAtLeast(1),
+            viewH = viewH.coerceAtLeast(1),
+            zoom = zoomForMath,
+            roi = box
+        )
+        // When the JPEG is already smaller than the sensor, treat it as the
+        // preview buffer: only an aspect trim, never a second zoom.
+        val use = if (!bitmapIsFull || !fullSensor) {
+            CaptureFraming.frame(
+                bitmap.width,
+                bitmap.height,
+                CaptureFraming.Px(0, 0, bitmap.width, bitmap.height),
+                bitmap.width,
+                bitmap.height,
+                viewW.coerceAtLeast(1),
+                viewH.coerceAtLeast(1),
+                zoom = 1f,
+                roi = box
+            )
+        } else {
+            framed
+        }
+        val cropped = cropBitmap(bitmap, use.crop)
+        val note = if (use.unchanged) {
+            "Framing kept the full ${bitmap.width}x${bitmap.height} still (zoom math $zoomForMath, sensor long $activeLong)."
+        } else {
+            "Framing center crop ${use.crop.w}x${use.crop.h} from ${bitmap.width}x${bitmap.height} at zoom $zoomForMath."
+        }
+        return Framed(cropped, use.roi, note)
     }
 
-    private fun RectF.normalized(): RectF {
-        val l = min(left, right)
-        val t = min(top, bottom)
-        val r = max(left, right)
-        val b = max(top, bottom)
-        return RectF(l, t, r, b)
-    }
-
-    private fun NormRect.sorted(): NormRect {
-        val l = min(left, right)
-        val r = max(left, right)
-        val t = min(top, bottom)
-        val b = max(top, bottom)
-        return if (r - l < 0.02f || b - t < 0.02f) this else NormRect(l, t, r, b)
-    }
-
-    private fun cropBitmap(bitmap: Bitmap, rect: RectF): Bitmap {
-        val l = rect.left.coerceIn(0f, (bitmap.width - 1).toFloat())
-        val t = rect.top.coerceIn(0f, (bitmap.height - 1).toFloat())
-        val r = rect.right.coerceIn(l + 1f, bitmap.width.toFloat())
-        val b = rect.bottom.coerceIn(t + 1f, bitmap.height.toFloat())
-        val x = l.toInt()
-        val y = t.toInt()
-        val w = (r - l).toInt().coerceIn(1, bitmap.width - x)
-        val h = (b - t).toInt().coerceIn(1, bitmap.height - y)
+    private fun cropBitmap(bitmap: Bitmap, crop: CaptureFraming.Px): Bitmap {
+        val x = crop.x.coerceIn(0, bitmap.width - 1)
+        val y = crop.y.coerceIn(0, bitmap.height - 1)
+        val w = crop.w.coerceIn(1, bitmap.width - x)
+        val h = crop.h.coerceIn(1, bitmap.height - y)
         if (w >= bitmap.width - 2 && h >= bitmap.height - 2) return bitmap
         val cropped = Bitmap.createBitmap(bitmap, x, y, w, h)
         if (cropped !== bitmap) bitmap.recycle()
         return cropped
     }
 
-    private fun centerCropToPreview(bitmap: Bitmap, viewW: Int, viewH: Int): Bitmap {
-        if (viewW < 2 || viewH < 2) return bitmap
-        val target = viewW.toFloat() / viewH
-        val current = bitmap.width.toFloat() / bitmap.height
-        if (abs(target - current) / target < 0.04f) return bitmap
-        val w: Int
-        val h: Int
-        if (current > target) {
-            h = bitmap.height
-            w = (bitmap.height * target).toInt().coerceIn(1, bitmap.width)
-        } else {
-            w = bitmap.width
-            h = (bitmap.width / target).toInt().coerceIn(1, bitmap.height)
+    private fun stillGray(image: RgbImage): IntArray {
+        val out = IntArray(MotionGate.W * MotionGate.H)
+        for (oy in 0 until MotionGate.H) {
+            val sy = (oy * image.height / MotionGate.H).coerceIn(0, image.height - 1)
+            val row = oy * MotionGate.W
+            for (ox in 0 until MotionGate.W) {
+                val sx = (ox * image.width / MotionGate.W).coerceIn(0, image.width - 1)
+                val i = sy * image.width + sx
+                out[row + ox] = (image.red(i) * 30 + image.green(i) * 59 + image.blue(i) * 11) / 100
+            }
         }
-        val x = ((bitmap.width - w) / 2).coerceAtLeast(0)
-        val y = ((bitmap.height - h) / 2).coerceAtLeast(0)
-        val cropped = Bitmap.createBitmap(bitmap, x, y, w, h)
-        if (cropped !== bitmap) bitmap.recycle()
-        return cropped
+        return out
     }
 
-    /** EXIF rotation first. If the file has none, use the capture's rotation. */
-    private fun uprightBitmap(jpeg: ByteArray, proxyDegrees: Int): Bitmap {
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun sensorLongSide(bound: Camera): Int {
+        return try {
+            val rect = Camera2CameraInfo.from(bound.cameraInfo)
+                .getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+            if (rect == null) 0 else max(rect.width(), rect.height())
+        } catch (t: Throwable) {
+            Log.w(TAG, "sensor size unavailable", t)
+            0
+        }
+    }
+
+    /**
+     * EXIF rotation first. A proxy rotation is applied only when it makes the
+     * bitmap's aspect closer to the preview. That avoids turning an
+     * already-upright JPEG on its side.
+     */
+    private fun uprightBitmap(jpeg: ByteArray, proxyDegrees: Int, viewW: Int, viewH: Int): Bitmap {
         val bitmap = decodeUpright(jpeg)
         val exif = exifDegrees(jpeg)
-        if (exif != 0 || proxyDegrees == 0) return bitmap
+        if (exif != 0 || proxyDegrees == 0 || viewW < 2 || viewH < 2) return bitmap
+        val swap = proxyDegrees == 90 || proxyDegrees == 270
+        if (!swap && proxyDegrees != 180) return bitmap
+        val viewA = viewW.toFloat() / viewH
+        val now = bitmap.width.toFloat() / bitmap.height
+        val turned = if (swap) bitmap.height.toFloat() / bitmap.width else now
+        val nowErr = abs(now - viewA) / viewA
+        val turnErr = abs(turned - viewA) / viewA
+        if (turnErr + 0.02f >= nowErr) return bitmap
         val matrix = android.graphics.Matrix().apply { postRotate(proxyDegrees.toFloat()) }
         val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
         if (rotated !== bitmap) bitmap.recycle()
         return rotated
+    }
+
+    private fun rotationUsed(bitmap: Bitmap, photo: ImageProxy, viewW: Int, viewH: Int): Int {
+        val proxy = photo.imageInfo.rotationDegrees
+        if (viewW < 2 || viewH < 2) return proxy
+        val viewA = viewW.toFloat() / viewH
+        val now = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)
+        val nowErr = abs(now - viewA) / viewA
+        val swap = proxy == 90 || proxy == 270
+        if (!swap) return if (nowErr < 0.08f) 0 else proxy
+        val turned = bitmap.height.toFloat() / bitmap.width.coerceAtLeast(1)
+        val turnErr = abs(turned - viewA) / viewA
+        return if (turnErr + 0.02f < nowErr) proxy else 0
     }
 
     private fun exifDegrees(jpeg: ByteArray): Int {
@@ -544,7 +590,8 @@ class AutoCapture(
 
     companion object {
         private const val TAG = "SrrTracker"
-        private const val CAPTURE_TIMEOUT_MS = 8_000L
+        private const val CAPTURE_TIMEOUT_MS = 20_000L
         private const val MAX_EDGE = 4096
+        private const val MAX_TRIES = 3
     }
 }

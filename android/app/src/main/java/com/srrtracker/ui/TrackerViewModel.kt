@@ -109,11 +109,14 @@ data class UiState(
     val zoom: Float = 1f,
     val zoomMin: Float = 1f,
     val zoomMax: Float = 8f,
-    val diePx: Int? = null
+    val diePx: Int? = null,
+    val saveAllCaptures: Boolean = true,
+    val notice: String? = null
 )
 
 sealed interface UiEffect {
     data class ShareFile(val path: String) : UiEffect
+    data class ShareImage(val path: String) : UiEffect
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -142,6 +145,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         val sound = prefs.getBoolean(KEY_SOUNDS, true)
         val mark = prefs.getBoolean(KEY_MARK, true)
         val crops = prefs.getBoolean(KEY_CROPS, true)
+        val saveAll = prefs.getBoolean(KEY_SAVE_ALL, true)
         val zoom = prefs.getFloat(KEY_ZOOM, 1f)
         val frame = loadFrame()
         _ui.update {
@@ -152,6 +156,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 soundOn = sound,
                 markPhotos = mark,
                 saveDieCrops = crops,
+                saveAllCaptures = saveAll,
                 frame = frame,
                 zoom = zoom,
                 status = if (guide) "Paused" else "Starting camera..."
@@ -229,8 +234,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         Log.i(
             TAG,
             "photo received still ${image.width}x${image.height} raw ${shot.rawW}x${shot.rawH} " +
-                "preview view ${shot.previewViewW}x${shot.previewViewH} stream ${shot.previewStream}"
+                "preview view ${shot.previewViewW}x${shot.previewViewH} stream ${shot.previewStream} " +
+                "present=${shot.dicePresent} ${shot.framingNote}"
         )
+        if (_ui.value.saveAllCaptures) {
+            viewModelScope.launch(Dispatchers.IO) {
+                saveJpegToDownloads(jpeg, "still-${System.currentTimeMillis()}.jpg")
+            }
+        }
         val state = _ui.value
         if (!state.running || state.pending != null) {
             Log.w(TAG, "photo dropped running=${state.running} pending=${state.pending != null}")
@@ -544,6 +555,42 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(saveDieCrops = on) }
     }
 
+    fun setSaveAllCaptures(on: Boolean) {
+        prefs.edit().putBoolean(KEY_SAVE_ALL, on).apply()
+        _ui.update { it.copy(saveAllCaptures = on) }
+    }
+
+    fun sharePending() {
+        val jpeg = _ui.value.pending?.jpeg ?: return
+        shareJpeg(jpeg, "srr-still.jpg")
+    }
+
+    fun savePendingToDownloads() {
+        val jpeg = _ui.value.pending?.jpeg ?: return
+        viewModelScope.launch {
+            val name = "still-${System.currentTimeMillis()}.jpg"
+            withContext(Dispatchers.IO) { saveJpegToDownloads(jpeg, name) }
+            note("Saved the full-resolution still to Downloads/SRR-Tracker")
+        }
+    }
+
+    fun shareDetailPhoto() {
+        val path = detailRoll()?.photoPath ?: return
+        viewModelScope.launch {
+            val jpeg = withContext(Dispatchers.IO) { File(path).readBytes() }
+            shareJpeg(jpeg, "srr-still.jpg")
+        }
+    }
+
+    fun saveDetailToDownloads() {
+        val path = detailRoll()?.photoPath ?: return
+        viewModelScope.launch {
+            val jpeg = withContext(Dispatchers.IO) { File(path).readBytes() }
+            withContext(Dispatchers.IO) { saveJpegToDownloads(jpeg, "still-${System.currentTimeMillis()}.jpg") }
+            note("Saved the full-resolution still to Downloads/SRR-Tracker")
+        }
+    }
+
     fun setFrame(rect: NormRect) {
         val next = NormRect(
             left = rect.left.coerceIn(0f, 0.85f),
@@ -605,19 +652,31 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun readFailureReason(det: DiceDetector.Detection?, shot: StillCapture, diePx: Int?): String {
+        val missed = if (!shot.dicePresent) {
+            "The saved frame does not show a die in the box. "
+        } else {
+            ""
+        }
         val base = when {
             det == null -> "The photo could not be read."
             !det.ok -> det.reason ?: "No pips found."
             det.hint.isNotBlank() -> det.hint
             else -> "Not sure about this read."
         }
-        val size = if (diePx != null && diePx > 0) {
-            val small = if (diePx < 60) " Dice look small: zoom in or move the phone closer." else ""
-            " Dice are $diePx px across.$small"
-        } else {
-            ""
-        }
-        return base + size + " Still ${shot.image.width}x${shot.image.height}, preview ${shot.previewViewW}x${shot.previewViewH}."
+        val size = dieSizeSentence(det, diePx)
+        return missed + base + size + " Still ${shot.image.width}x${shot.image.height}, preview ${shot.previewViewW}x${shot.previewViewH}. ${shot.framingNote}"
+    }
+
+    /**
+     * [diePx] is the longest side of the detector's rectangle on the saved still,
+     * the median when there are several. It is not the die's size in the preview.
+     */
+    private fun dieSizeSentence(det: DiceDetector.Detection?, diePx: Int?): String {
+        val dice = det?.dice?.filter { it.w > 0 && it.h > 0 }.orEmpty()
+        if (dice.isEmpty() || diePx == null || diePx <= 0) return ""
+        val boxes = dice.joinToString(", ") { "${it.w}×${it.h}" }
+        val small = if (diePx < 60) " Dice look small: zoom in or move the phone closer." else ""
+        return " Die box long side is $diePx px on this still (rectangles $boxes). That is the detector's box on the saved photo, not the die's size in the preview.$small"
     }
 
     private fun medianDiePx(det: DiceDetector.Detection?): Int? {
@@ -800,6 +859,45 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun shareJpeg(jpeg: ByteArray, name: String) {
+        viewModelScope.launch {
+            val file = withContext(Dispatchers.IO) {
+                val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                File(dir, name).apply { writeBytes(jpeg) }
+            }
+            _effects.emit(UiEffect.ShareImage(file.absolutePath))
+        }
+    }
+
+    private fun note(text: String) {
+        _ui.update { it.copy(notice = text) }
+        viewModelScope.launch {
+            delay(2500)
+            _ui.update { if (it.notice == text) it.copy(notice = null) else it }
+        }
+    }
+
+    private fun saveJpegToDownloads(jpeg: ByteArray, name: String) {
+        val app = getApplication<Application>()
+        if (Build.VERSION.SDK_INT < 29) {
+            val dir = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)?.let { File(it, "SRR-Tracker") } ?: return
+            dir.mkdirs()
+            File(dir, name).writeBytes(jpeg)
+            return
+        }
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SRR-Tracker")
+            }
+            val uri = app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
+            app.contentResolver.openOutputStream(uri)?.use { it.write(jpeg) }
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not save still to Downloads", t)
+        }
+    }
+
     private fun saveToDownloads(name: String, csv: String) {
         val app = getApplication<Application>()
         if (Build.VERSION.SDK_INT < 29) return
@@ -826,6 +924,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         private const val KEY_SETTLE = "settleMs"
         private const val KEY_SOUNDS = "sounds"
         private const val KEY_ZOOM = "zoom"
+        private const val KEY_SAVE_ALL = "saveAllCaptures"
         private const val KEY_MARK = "markPhotos"
         private const val KEY_CROPS = "saveDieCrops"
         private const val KEY_FRAME_L = "frameL"

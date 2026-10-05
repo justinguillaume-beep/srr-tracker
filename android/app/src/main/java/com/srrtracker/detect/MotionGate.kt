@@ -254,11 +254,15 @@ class MotionGate(
         stampSettleOnNext = false
     }
 
-    fun diceInBox(gray: IntArray): Boolean {
-        val x0 = (frame.left * W).toInt().coerceIn(0, W - 1)
-        val x1 = (frame.right * W).toInt().coerceIn(x0 + 1, W)
-        val y0 = (frame.top * H).toInt().coerceIn(0, H - 1)
-        val y1 = (frame.bottom * H).toInt().coerceIn(y0 + 1, H)
+    fun diceInBox(gray: IntArray): Boolean = subjectIn(gray, frame)
+
+    /** True when [roi] on a 640×360 gray frame holds a subject darker or lighter than its border. */
+    fun subjectIn(gray: IntArray, roi: NormRect): Boolean {
+        require(gray.size == W * H)
+        val x0 = (roi.left * W).toInt().coerceIn(0, W - 1)
+        val x1 = (roi.right * W).toInt().coerceIn(x0 + 1, W)
+        val y0 = (roi.top * H).toInt().coerceIn(0, H - 1)
+        val y1 = (roi.bottom * H).toInt().coerceIn(y0 + 1, H)
         if (x1 <= x0 || y1 <= y0) return false
         val border = ArrayList<Int>(((x1 - x0) + (y1 - y0)) / 2 + 8)
         var x = x0

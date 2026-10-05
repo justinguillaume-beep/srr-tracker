@@ -102,7 +102,10 @@ class MainActivity : ComponentActivity() {
             val context = LocalContext.current
             LaunchedEffect(vm) {
                 vm.effects.collect { effect ->
-                    if (effect is UiEffect.ShareFile) shareCsv(context, File(effect.path))
+                    when (effect) {
+                        is UiEffect.ShareFile -> shareCsv(context, File(effect.path))
+                        is UiEffect.ShareImage -> shareImage(context, File(effect.path))
+                    }
                 }
             }
             val view = LocalView.current
@@ -118,7 +121,7 @@ class MainActivity : ComponentActivity() {
                     state.detailId != null -> DetailScreen(vm, state)
                     else -> MainScreen(vm, state)
                 }
-                state.pending?.let { CheckScreen(vm, it) }
+                state.pending?.let { CheckScreen(vm, it, state.notice) }
             }
         }
     }
@@ -336,15 +339,16 @@ private fun RollLine(row: RollRow, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CheckScreen(vm: TrackerViewModel, pending: PendingCheck) {
+private fun CheckScreen(vm: TrackerViewModel, pending: PendingCheck, notice: String?) {
     var photo by remember(pending.jpeg) { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(pending.jpeg) {
         photo = withContext(Dispatchers.IO) {
             BitmapFactory.decodeByteArray(pending.jpeg, 0, pending.jpeg.size)
         }
     }
+    val dice = pending.detected?.dice.orEmpty()
     Column(
-        Modifier.fillMaxSize().background(Bg).padding(16.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).background(Bg).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Text(
@@ -356,15 +360,30 @@ private fun CheckScreen(vm: TrackerViewModel, pending: PendingCheck) {
             color = Muted,
             fontSize = 18.sp
         )
-        Text("Tap a number if it is wrong, then save.", color = Muted, fontSize = 16.sp)
-        photo?.let {
-            Image(
-                it.asImageBitmap(),
-                contentDescription = "Photo of the dice",
-                modifier = Modifier.fillMaxWidth().height(180.dp),
-                contentScale = ContentScale.Fit
-            )
+        Text("Yellow boxes are where the reader looked on this photo.", color = Muted, fontSize = 16.sp)
+        photo?.let { bmp ->
+            StillWithBoxes(bmp, dice)
+            if (dice.isEmpty()) {
+                Text("No die box on this photo.", color = Muted, fontSize = 16.sp)
+            } else {
+                Text("Each die, enlarged from this still.", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                dice.forEachIndexed { index, die ->
+                    val crop = remember(bmp, die.x, die.y, die.w, die.h) { dieCrop(bmp, die) }
+                    Text(
+                        "Die ${index + 1}: box ${die.w}×${die.h} px, long side ${max(die.w, die.h)} px, read ${die.count}",
+                        color = Muted,
+                        fontSize = 16.sp
+                    )
+                    Image(
+                        crop.asImageBitmap(),
+                        contentDescription = "Die ${index + 1}",
+                        modifier = Modifier.fillMaxWidth().height(200.dp).background(Color.Black),
+                        contentScale = ContentScale.Fit
+                    )
+                }
+            }
         }
+        if (!notice.isNullOrBlank()) Text(notice, color = Good, fontSize = 16.sp)
         DiePicker("Left die", pending.d1) { vm.pickPending(0, it) }
         DiePicker("Right die", pending.d2) { vm.pickPending(1, it) }
         val total = if (pending.d1 != null && pending.d2 != null) pending.d1 + pending.d2 else null
@@ -376,16 +395,53 @@ private fun CheckScreen(vm: TrackerViewModel, pending: PendingCheck) {
             modifier = Modifier.fillMaxWidth(),
             textAlign = TextAlign.Center
         )
-        Spacer(Modifier.weight(1f))
+        BigButton("Share last photo", { vm.sharePending() }, Modifier.fillMaxWidth(), primary = false)
+        BigButton("Save full-resolution still", { vm.savePendingToDownloads() }, Modifier.fillMaxWidth(), primary = false)
         BigButton("Save roll", { vm.savePending() }, Modifier.fillMaxWidth(), enabled = total != null)
         BigButton("Skip", { vm.skipPending() }, Modifier.fillMaxWidth(), primary = false)
     }
 }
 
 @Composable
+private fun StillWithBoxes(bmp: Bitmap, dice: List<com.srrtracker.detect.DiceDetector.DieMark>) {
+    Canvas(Modifier.fillMaxWidth().height(240.dp).background(Color.Black)) {
+        val scale = min(size.width / bmp.width, size.height / bmp.height)
+        val dw = bmp.width * scale
+        val dh = bmp.height * scale
+        val left = (size.width - dw) / 2f
+        val top = (size.height - dh) / 2f
+        drawImage(
+            bmp.asImageBitmap(),
+            dstOffset = androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()),
+            dstSize = androidx.compose.ui.unit.IntSize(dw.toInt().coerceAtLeast(1), dh.toInt().coerceAtLeast(1))
+        )
+        for (die in dice) {
+            drawRect(
+                color = Color(0xFFFFD400),
+                topLeft = Offset(left + die.x * scale, top + die.y * scale),
+                size = Size(die.w * scale, die.h * scale),
+                style = Stroke(width = 3f)
+            )
+        }
+    }
+}
+
+private fun dieCrop(src: Bitmap, die: com.srrtracker.detect.DiceDetector.DieMark): Bitmap {
+    val pad = (max(die.w, die.h) * 0.25f).toInt()
+    val x = (die.x - pad).coerceIn(0, src.width - 1)
+    val y = (die.y - pad).coerceIn(0, src.height - 1)
+    val w = (die.w + pad * 2).coerceIn(1, src.width - x)
+    val h = (die.h + pad * 2).coerceIn(1, src.height - y)
+    return Bitmap.createBitmap(src, x, y, w, h)
+}
+
+@Composable
 private fun DetailScreen(vm: TrackerViewModel, state: UiState) {
     val roll = vm.detailRoll()
-    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 roll?.let { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(it.ts)) } ?: "Roll",
@@ -445,7 +501,9 @@ private fun DetailScreen(vm: TrackerViewModel, state: UiState) {
             modifier = Modifier.fillMaxWidth(),
             textAlign = TextAlign.Center
         )
-        Spacer(Modifier.weight(1f))
+        if (!state.notice.isNullOrBlank()) Text(state.notice, color = Good, fontSize = 16.sp)
+        BigButton("Share last photo", { vm.shareDetailPhoto() }, Modifier.fillMaxWidth(), primary = false, enabled = roll.photoPath != null)
+        BigButton("Save full-resolution still", { vm.saveDetailToDownloads() }, Modifier.fillMaxWidth(), primary = false, enabled = roll.photoPath != null)
         BigButton("Delete this roll", { vm.askDelete() }, Modifier.fillMaxWidth(), primary = false)
     }
     if (state.confirmDelete) {
@@ -523,6 +581,15 @@ private fun SettingsDialog(vm: TrackerViewModel, state: UiState) {
                 Text("Save each die crop", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
                 Switch(checked = state.saveDieCrops, onCheckedChange = { vm.setSaveDieCrops(it) })
             }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Save every capture, even failed", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                Switch(checked = state.saveAllCaptures, onCheckedChange = { vm.setSaveAllCaptures(it) })
+            }
+            Text(
+                "On by default. Each still is saved at full resolution in Downloads/SRR-Tracker.",
+                color = Muted,
+                fontSize = 16.sp
+            )
             Text("Drag the box onto the two dice. Drag a corner to resize it.", color = Muted, fontSize = 16.sp)
             BigButton("Reset box", { vm.resetFrame() }, Modifier.fillMaxWidth(), primary = false)
             BigButton("Done", { vm.closeSettings() }, Modifier.fillMaxWidth())
@@ -750,6 +817,17 @@ private fun statusColor(state: UiState): Color = when {
     state.status.startsWith("Logged") -> Good
     state.status.startsWith("Could not") || state.status.startsWith("Check") || state.status.startsWith("Camera") -> Color(0xFFFFC107)
     else -> Ink
+}
+
+private fun shareImage(context: android.content.Context, file: File) {
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "image/jpeg"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, file.name)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, "Share the still"))
 }
 
 private fun shareCsv(context: android.content.Context, file: File) {
