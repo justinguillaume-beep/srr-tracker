@@ -427,7 +427,9 @@ private fun StillWithBoxes(bmp: Bitmap, dice: List<com.srrtracker.detect.DiceDet
 }
 
 private fun dieCrop(src: Bitmap, die: com.srrtracker.detect.DiceDetector.DieMark): Bitmap {
-    val pad = (max(die.w, die.h) * 0.25f).toInt()
+    // Same bitmap pixels as the yellow overlay. A half-die pad keeps the face
+    // in frame when the mask box is tight on the body.
+    val pad = (max(die.w, die.h) * 0.5f).toInt().coerceAtLeast(8)
     val x = (die.x - pad).coerceIn(0, src.width - 1)
     val y = (die.y - pad).coerceIn(0, src.height - 1)
     val w = (die.w + pad * 2).coerceIn(1, src.width - x)

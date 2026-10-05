@@ -7,12 +7,18 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
- * Finds small translucent purple and amber dice with white pips on a grey cloth.
- * Teal foam, grey wrinkles, and nearby clutter (boxes, bottles, tools) are the
- * wrong hue or the wrong shape, so they are not dice. More than two dice is
- * reported as a count instead of being forced into a pair.
+ * Finds small translucent purple, amber, and red/pink dice with white pips on a
+ * grey cloth. Teal foam, grey wrinkles, and nearby clutter (boxes, bottles, tools)
+ * are the wrong hue or the wrong shape, so they are not dice. More than two dice
+ * is reported as a count instead of being forced into a pair.
  *
  * Only pixels inside [roi] are looked at. A null roi is the whole photo.
+ *
+ * The color mask is a downscale (long side 1600). Each mask pixel maps back with
+ * its own x and y scale (`full / small`), so a 3060×1826 still is not shifted by
+ * a single long-side factor. The saved still is already the framing crop, so
+ * these boxes are in that still's pixels — the center-crop offset is not added
+ * again here.
  */
 object ColoredDiceReader {
     /**
@@ -138,26 +144,46 @@ object ColoredDiceReader {
         val sw = max(1, (image.width / scale).roundToInt())
         val sh = max(1, (image.height / scale).roundToInt())
         val small = if (sw == image.width && sh == image.height) image else ImageOps.scale(image, sw, sh)
+        // Round(full/scale) can leave sw*scale != width. Map each axis by the
+        // real small-image size so a die near the far edge is not shifted.
+        val xScale = image.width.toFloat() / sw
+        val yScale = image.height.toFloat() / sh
         val purple = BooleanArray(sw * sh)
         val yellow = BooleanArray(sw * sh)
+        val red = BooleanArray(sw * sh)
         for (i in purple.indices) {
             val r = small.red(i)
             val g = small.green(i)
             val b = small.blue(i)
             val mx = max(r, max(g, b))
-            val mn = min(r, min(g, b))
-            val chroma = mx - mn
+            val chroma = mx - min(r, min(g, b))
             val pur = min(r, b) - g
             val yel = min(r, g) - b
             if (pur > 14 && mx in 50..239 && chroma > 12) purple[i] = true
             else if (yel > 48 && mx > 90 && b < 165 && chroma > 40 && g > 80) yellow[i] = true
+            else if (redDie(r, g, b, chroma)) red[i] = true
         }
         val boxes = ArrayList<Box>()
-        boxes += components(close(purple, sw, sh, 1), sw, sh, 'P', scale, image.width, image.height, 0.32f)
+        boxes += components(close(purple, sw, sh, 1), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f)
         // Gold dice are translucent, so the yellow mask is full of pip holes.
         // A wider close joins those holes without lowering the yellow threshold.
-        boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, image.width, image.height, 0.27f)
-        return dropSizeOutliers(mergeSameColor(boxes))
+        boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, xScale, yScale, image.width, image.height, 0.27f)
+        // Red/pink dice are translucent too. Close radius 2 fills pip holes
+        // without pulling in the warm grey cloth (that stays under the margin).
+        boxes += components(close(red, sw, sh, 2), sw, sh, 'R', scale, xScale, yScale, image.width, image.height, 0.28f)
+        return dropSizeOutliers(dropContained(mergeSameColor(boxes)))
+    }
+
+    /**
+     * A red or pink die has R clearly above both G and B. Amber stays on the
+     * yellow test (margin 48, so ivory near 46 is not taken). Warm grey cloth
+     * is only a few levels redder than green, which this margin rejects.
+     */
+    private fun redDie(r: Int, g: Int, b: Int, chroma: Int): Boolean {
+        val margin = r - max(g, b)
+        // Margin 40 keeps warm tan clutter (red ahead of green by ~25) off the
+        // mask. Pink dice on the check-screen stills are well above this.
+        return margin > 40 && chroma > 44 && r > 90 && r - g > 34 && r - b > 28 && g < 175 && b < 155
     }
 
     private fun dropSizeOutliers(boxes: List<Box>): List<Box> {
@@ -176,6 +202,8 @@ object ColoredDiceReader {
         h: Int,
         kind: Char,
         scale: Float,
+        xScale: Float,
+        yScale: Float,
         fullW: Int,
         fullH: Int,
         minFill: Float
@@ -218,7 +246,7 @@ object ColoredDiceReader {
             // Split that blob at its narrow waist. A blob we already accept is left whole.
             if ((bw > maxSide && bh in minSide..maxSide) || (bh > maxSide && bw in minSide..maxSide)) {
                 for (span in splitTouching(pix, area, w, bw > maxSide, minSide, maxSide)) {
-                    consider(out, span, kind, scale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill)
+                    consider(out, span, kind, xScale, yScale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill)
                 }
                 continue
             }
@@ -227,7 +255,7 @@ object ColoredDiceReader {
             val aspect = bw.toFloat() / bh
             val fill = area.toFloat() / (bw * bh)
             if (aspect !in 0.55f..1.80f || fill < minFill) continue
-            out += toBox(minX, minY, maxX, maxY, area, kind, scale, fullW, fullH)
+            out += toBox(minX, minY, maxX, maxY, area, kind, xScale, yScale, fullW, fullH)
         }
         return out
     }
@@ -309,7 +337,8 @@ object ColoredDiceReader {
         out: MutableList<Box>,
         span: Span,
         kind: Char,
-        scale: Float,
+        xScale: Float,
+        yScale: Float,
         fullW: Int,
         fullH: Int,
         minSide: Int,
@@ -325,7 +354,7 @@ object ColoredDiceReader {
         val aspect = bw.toFloat() / bh
         val fill = span.area.toFloat() / (bw * bh)
         if (aspect !in 0.55f..1.80f || fill < minFill) return
-        out += toBox(span.x0, span.y0, span.x1, span.y1, span.area, kind, scale, fullW, fullH)
+        out += toBox(span.x0, span.y0, span.x1, span.y1, span.area, kind, xScale, yScale, fullW, fullH)
     }
 
     private fun toBox(
@@ -335,15 +364,31 @@ object ColoredDiceReader {
         maxY: Int,
         area: Int,
         kind: Char,
-        scale: Float,
+        xScale: Float,
+        yScale: Float,
         fullW: Int,
         fullH: Int
     ): Box {
-        val x = (minX * scale).roundToInt().coerceIn(0, fullW - 1)
-        val y = (minY * scale).roundToInt().coerceIn(0, fullH - 1)
-        val r = ((maxX + 1) * scale).roundToInt().coerceIn(x + 1, fullW)
-        val b = ((maxY + 1) * scale).roundToInt().coerceIn(y + 1, fullH)
+        val x = (minX * xScale).roundToInt().coerceIn(0, fullW - 1)
+        val y = (minY * yScale).roundToInt().coerceIn(0, fullH - 1)
+        val r = ((maxX + 1) * xScale).roundToInt().coerceIn(x + 1, fullW)
+        val b = ((maxY + 1) * yScale).roundToInt().coerceIn(y + 1, fullH)
         return Box(x, y, r - x, b - y, area, kind)
+    }
+
+    /** A small blob whose center sits inside a larger die is a fringe, not a second die. */
+    private fun dropContained(boxes: List<Box>): List<Box> {
+        if (boxes.size < 2) return boxes
+        return boxes.filterIndexed { i, box ->
+            val cx = box.x + box.w / 2
+            val cy = box.y + box.h / 2
+            boxes.indices.none { j ->
+                if (j == i) return@none false
+                val other = boxes[j]
+                val bigger = other.w * other.h > box.w * box.h
+                bigger && cx >= other.x && cy >= other.y && cx < other.x + other.w && cy < other.y + other.h
+            }
+        }
     }
 
     private fun push(mask: BooleanArray, seen: BooleanArray, stack: IntArray, sp: Int, i: Int): Int {

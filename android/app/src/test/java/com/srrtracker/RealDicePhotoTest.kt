@@ -1,6 +1,7 @@
 package com.srrtracker
 
 import com.srrtracker.detect.ColoredDiceReader
+import com.srrtracker.detect.ImageOps
 import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.RgbImage
 import org.junit.Assert.assertEquals
@@ -104,6 +105,101 @@ class RealDicePhotoTest {
         val empty = ColoredDiceReader.read(image, NormRect(0.02f, 0.02f, 0.18f, 0.18f))
         assertEquals(0, empty.dice.size)
         assertEquals("found 0 dice", empty.reason)
+    }
+
+    /**
+     * Phone screenshots of the check screen, not the saved 3060×1826 still.
+     * The still region is lifted out and the yellow overlay stroke is painted
+     * back to cloth. The reader runs on that crop at the screenshot's own
+     * size. Face counts are printed only. The original sensor JPEG is not
+     * in the screenshot.
+     */
+    @Test
+    fun checkScreenScreenshotsReconstructTheStillAndPrintDice() {
+        val names = listOf("check-red-dice.jpg", "check-red-dice-bottom.jpg")
+        for (name in names) {
+            val stream = javaClass.classLoader.getResourceAsStream("ui/$name")
+                ?: error("missing ui/$name")
+            val ui = decodeJpeg(stream)
+            println("ui $name ${ui.width}x${ui.height}")
+            val whole = ColoredDiceReader.read(ui)
+            println(
+                "  whole dice=${whole.dice.size} reason=${whole.reason} " +
+                    whole.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+            )
+            val still = stillFromCheckScreen(ui)
+            if (still == null) {
+                println("  no still region on this screenshot")
+                continue
+            }
+            val det = ColoredDiceReader.read(still)
+            val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+            println(
+                "  reconstructed ${still.width}x${still.height} dice=${det.dice.size} " +
+                    "ok=${det.ok} reason=${det.reason} boxes=$boxes"
+            )
+            println("  sizes ${ColoredDiceReader.lastSizeLog}")
+        }
+    }
+
+    /**
+     * The check photo is the grey cloth on a black canvas. Cover the yellow
+     * box stroke so the overlay itself is not a die.
+     */
+    private fun stillFromCheckScreen(ui: RgbImage): RgbImage? {
+        if (ui.width < 900 || ui.height < 1600) return null
+        // Text rows are mostly black, so the median stays dark. The still is grey cloth.
+        val photoRow = BooleanArray(ui.height)
+        val scratch = IntArray(ui.width)
+        for (y in 0 until ui.height) {
+            val row = y * ui.width
+            for (x in 0 until ui.width) {
+                val p = ui.pixels[row + x]
+                scratch[x] = (((p shr 16) and 0xFF) + ((p shr 8) and 0xFF) + (p and 0xFF)) / 3
+            }
+            scratch.sort()
+            photoRow[y] = scratch[ui.width / 2] > 70
+        }
+        var bestTop = -1
+        var bestBot = -1
+        var run = -1
+        for (y in 0..ui.height) {
+            val on = y < ui.height && photoRow[y]
+            if (on && run < 0) run = y
+            if (!on && run >= 0) {
+                if (y - run > bestBot - bestTop) {
+                    bestTop = run
+                    bestBot = y - 1
+                }
+                run = -1
+            }
+        }
+        if (bestTop < 0 || bestBot - bestTop < 200) return null
+        var left = ui.width
+        var right = 0
+        for (y in bestTop..bestBot) {
+            val row = y * ui.width
+            for (x in 0 until ui.width) {
+                val p = ui.pixels[row + x]
+                val luma = (((p shr 16) and 0xFF) + ((p shr 8) and 0xFF) + (p and 0xFF)) / 3
+                if (luma > 40) {
+                    if (x < left) left = x
+                    if (x > right) right = x
+                }
+            }
+        }
+        if (right - left < 200) return null
+        val crop = ImageOps.crop(ui, left, bestTop, right - left + 1, bestBot - bestTop + 1)
+        val pixels = crop.pixels.clone()
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val stroke = r > 180 && g > 140 && b < 120 && r + g > b + 160
+            if (stroke) pixels[i] = 0xFF6E6A64.toInt()
+        }
+        return RgbImage(crop.width, crop.height, pixels)
     }
 
     @Test
