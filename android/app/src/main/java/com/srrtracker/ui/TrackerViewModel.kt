@@ -2,6 +2,8 @@ package com.srrtracker.ui
 
 import android.app.Application
 import android.content.ContentValues
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -43,6 +45,7 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -75,6 +78,12 @@ data class SessionSummary(
     val rolls: Int,
     val ratio: String,
     val current: Boolean
+)
+
+data class LiveResult(
+    val total: Int,
+    val seven: Boolean,
+    val thumb: ByteArray
 )
 
 data class UiState(
@@ -112,7 +121,8 @@ data class UiState(
     val zoomMax: Float = 8f,
     val diePx: Int? = null,
     val saveAllCaptures: Boolean = true,
-    val notice: String? = null
+    val notice: String? = null,
+    val liveResult: LiveResult? = null
 )
 
 sealed interface UiEffect {
@@ -249,7 +259,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         flashJob?.cancel()
-        _ui.update { it.copy(status = "Counting...", statusIsSeven = false, busy = true) }
+        _ui.update { it.copy(status = "Counting...", statusIsSeven = false, busy = true, liveResult = null) }
         viewModelScope.launch {
             var openedCheck = false
             try {
@@ -284,10 +294,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                         saveJpegToDownloads(jpeg, "still-${System.currentTimeMillis()}.jpg")
                     }
                 }
-                val leftFace = det?.d1
-                val rightFace = det?.d2
-                val solid = boxes == 2 && det != null && det.ok && det.confidence == "high" &&
-                    leftFace != null && rightFace != null && leftFace in 1..6 && rightFace in 1..6
+                val solid = CaptureDecision.autoAccept(det)
                 if (solid) {
                     val saved = saveRoll(det!!.d1!!, det.d2!!, jpeg, image, det, userChanged = false, unread = false, reason = null)
                     if (saved <= 0) {
@@ -355,7 +362,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                             readReason = null
                         )
                     )
-                    showFlash("Logged ${d1 + d2}", d1 + d2 == 7)
+                    showFlash("Logged ${d1 + d2}", d1 + d2 == 7, liveThumb(pending.jpeg, d1 + d2))
                 }
             } else {
                 saveRoll(d1, d2, pending.jpeg, null, det, userChanged = changed, unread = false, reason = null)
@@ -780,7 +787,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             val px = medianDiePx(det)
             val size = if (px != null) " · ${px}px" else ""
             Log.i(TAG, "logged $total diePx=$px")
-            showFlash("Logged $total$size", total == 7)
+            showFlash("Logged $total$size", total == 7, liveThumb(jpeg, total))
         } else {
             Log.i(TAG, "unread saved: $reason")
         }
@@ -793,12 +800,44 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         roll.cropPaths?.lineSequence()?.forEach { photos.delete(it) }
     }
 
-    private fun showFlash(text: String, seven: Boolean) {
+    private fun showFlash(text: String, seven: Boolean, result: LiveResult? = null) {
         flashJob?.cancel()
-        _ui.update { it.copy(status = text, statusIsSeven = seven) }
+        _ui.update { it.copy(status = text, statusIsSeven = seven, liveResult = result) }
         flashJob = viewModelScope.launch {
             delay(2200)
-            if (!counting.get() && _ui.value.pending == null) publishLiveStatus()
+            if (!counting.get() && _ui.value.pending == null) {
+                _ui.update { it.copy(liveResult = null) }
+                publishLiveStatus()
+            }
+        }
+    }
+
+    /** A small copy of the still for the two-second result on the live camera. */
+    private suspend fun liveThumb(jpeg: ByteArray, total: Int): LiveResult? = withContext(Dispatchers.Default) {
+        try {
+            val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
+            val decoded = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, opts)
+                ?: return@withContext null
+            val maxSide = 240
+            val scale = maxSide.toFloat() / max(decoded.width, decoded.height).coerceAtLeast(1)
+            val thumb = if (scale < 1f) {
+                Bitmap.createScaledBitmap(
+                    decoded,
+                    (decoded.width * scale).toInt().coerceAtLeast(1),
+                    (decoded.height * scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                decoded
+            }
+            val bytes = ByteArrayOutputStream()
+            thumb.compress(Bitmap.CompressFormat.JPEG, 70, bytes)
+            if (thumb !== decoded) thumb.recycle()
+            decoded.recycle()
+            LiveResult(total, total == 7, bytes.toByteArray())
+        } catch (t: Throwable) {
+            Log.w(TAG, "thumbnail failed", t)
+            null
         }
     }
 

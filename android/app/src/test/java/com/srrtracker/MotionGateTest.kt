@@ -261,4 +261,31 @@ class MotionGateTest {
         val shot = gate.onFrame(resting, 600)
         assertTrue(shot.shouldCapture)
     }
+
+    @Test
+    fun aFreshThrowLandingOnTheSameSpotIsCaptured() {
+        val gate = MotionGate(sensitivity = 50, settleMs = 300, rearmMs = 200)
+        gate.running = true
+        val spot = felt().also { stamp(it, w / 2, h / 2, 8, 230) }
+        gate.onFrame(felt(), 0, coloredDice = 0)
+        gate.onFrame(spot, 40, coloredDice = 2)
+        gate.onFrame(spot, 80, coloredDice = 2)
+        val capturedAt = 80L + 300L
+        assertTrue(gate.onFrame(spot, capturedAt, coloredDice = 2).shouldCapture)
+        assertFalse(gate.onFrame(spot, capturedAt + 500, coloredDice = 2).shouldCapture)
+
+        val liftAt = capturedAt + MotionGate.POST_CAPTURE_QUIET_MS
+        val empty = felt()
+        val leaving = gate.onFrame(empty, liftAt, coloredDice = 0)
+        assertEquals(MotionGate.Phase.HOLD, leaving.phase)
+        val ready = gate.onFrame(empty, liftAt + MotionGate.EMPTY_REARM_MS, coloredDice = 0)
+        assertEquals(MotionGate.Phase.ARMED, ready.phase)
+
+        val backAt = liftAt + MotionGate.EMPTY_REARM_MS + 40
+        gate.onFrame(spot, backAt, coloredDice = 2)
+        val settling = gate.onFrame(spot, backAt + 40, coloredDice = 2)
+        assertEquals(MotionGate.Phase.SETTLING, settling.phase)
+        val shot = gate.onFrame(spot, backAt + 40 + 300, coloredDice = 2)
+        assertTrue("a new throw on the same spot must be logged", shot.shouldCapture)
+    }
 }

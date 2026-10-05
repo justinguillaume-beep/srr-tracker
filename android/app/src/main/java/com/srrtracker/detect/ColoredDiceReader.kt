@@ -610,7 +610,7 @@ object ColoredDiceReader {
             margin = read.margin,
             mark = DiceDetector.DieMark(die.x, die.y, die.w, die.h, read.count),
             pips = pips,
-            sizeLog = "crop ${die.w}x${die.h} face ${face0.width}x${face0.height} up ${factor}x -> ${face.width}x${face.height}"
+            sizeLog = "crop ${die.w}x${die.h} face ${face0.width}x${face0.height} up ${factor}x -> ${face.width}x${face.height} clear=${read.clear}"
         )
     }
 
@@ -671,7 +671,8 @@ object ColoredDiceReader {
         val count: Int,
         val clear: Boolean,
         val margin: Float,
-        val points: List<Pair<Float, Float>>
+        val points: List<Pair<Float, Float>>,
+        val ratio: Float = 9f
     )
 
     private fun readBlobs(face: RgbImage): BlobFace {
@@ -872,6 +873,7 @@ object ColoredDiceReader {
         var best = BlobFace(0, false, 0f, emptyList())
         var threeScore = -1e9f
         var three: BlobFace? = null
+        val votes = IntArray(7)
         for (thr in intArrayOf(208, 222, 236)) {
             val blobs = whiteBlobs(face, thr, openRadius)
             if (blobs.isEmpty()) continue
@@ -911,9 +913,12 @@ object ColoredDiceReader {
             } else {
                 true
             }
+            if (count in 1..6) votes[count]++
+            // A 1 or a 2 has to sit well inside the face. The saturated 6+6
+            // photo collapses into a 2 and a 1, and a wider rim would log that as 3.
             val clear = count in 1..6 && ratio <= 1.28f && inset && (count != 1 || oneOk)
             val score = (if (count in 1..6) 80f else 0f) + (if (clear) 30f else 0f) + thr / 10f - ratio * 8f
-            val faceRead = BlobFace(count, clear, if (clear) (1f / ratio) else 0f, kept.map { it.nx to it.ny })
+            val faceRead = BlobFace(count, clear, if (clear) (1f / ratio) else 0f, kept.map { it.nx to it.ny }, ratio)
             if (score > bestScore) {
                 bestScore = score
                 best = faceRead
@@ -926,8 +931,23 @@ object ColoredDiceReader {
                 three = faceRead
             }
         }
-        if (best.count == 2 && three != null) return three
-        return best
+        val chosen = if (best.count == 2 && three != null) three else best
+        return trustRimFace(chosen, votes)
+    }
+
+    /**
+     * A 4, 5, or 6 on a translucent die often has a corner pip just outside the
+     * strict inset, or one pip a little larger where the light hits. The same
+     * count at two thresholds is still that face. A 1 or a 2 is not promoted:
+     * those are how a blown-out six gets miscounted.
+     */
+    private fun trustRimFace(face: BlobFace, votes: IntArray): BlobFace {
+        if (face.clear || face.count !in 3..6) return face
+        if (votes[face.count] < 2) return face
+        if (face.ratio > 1.70f || face.points.isEmpty()) return face
+        val onFace = face.points.all { (x, y) -> x in 0.04f..0.93f && y in 0.04f..0.93f }
+        if (!onFace) return face
+        return BlobFace(face.count, true, 1f / face.ratio, face.points, face.ratio)
     }
 
     private fun whiteBlobs(face: RgbImage, thr: Int, openRadius: Int): List<Blob> {

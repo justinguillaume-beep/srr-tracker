@@ -212,6 +212,7 @@ class RealDicePhotoTest {
             val det = ColoredDiceReader.read(load(name))
             val got = det.counts?.toSet()
             println("$name got=$got truth=$truth ok=${det.ok} ${det.confidence} ${det.reason}")
+            println("  sizes ${ColoredDiceReader.lastSizeLog}")
             assertEquals(name, 2, det.dice.size)
             if (got == truth) {
                 assertTrue(det.ok)

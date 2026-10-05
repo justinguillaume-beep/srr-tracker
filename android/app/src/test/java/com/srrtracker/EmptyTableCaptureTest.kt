@@ -70,6 +70,47 @@ class EmptyTableCaptureTest {
         assertEquals(4, faces.first)
         assertNull(faces.second)
         assertTrue(CaptureDecision.countsAsRoll(4, 3, unread = false))
+        assertFalse(CaptureDecision.autoAccept(det))
+    }
+
+    @Test
+    fun aConfidentPairIsLoggedWithoutATap() {
+        val det = DiceDetector.Detection(
+            ok = true,
+            total = 10,
+            counts = listOf(6, 4),
+            confidence = "high",
+            cost = null,
+            margin = 0.8,
+            pips = emptyList(),
+            dice = listOf(
+                DiceDetector.DieMark(10, 10, 159, 147, 6),
+                DiceDetector.DieMark(200, 10, 130, 148, 4)
+            )
+        )
+        assertTrue(CaptureDecision.autoAccept(det))
+    }
+
+    @Test
+    fun anUnclearPairStaysOnTheCheckScreen() {
+        val det = DiceDetector.Detection(
+            ok = false,
+            total = null,
+            counts = listOf(2, 1),
+            confidence = "none",
+            cost = null,
+            margin = null,
+            pips = emptyList(),
+            reason = "pips unclear",
+            dice = listOf(
+                DiceDetector.DieMark(10, 10, 95, 100, 2),
+                DiceDetector.DieMark(200, 10, 105, 135, 1)
+            )
+        )
+        assertFalse(CaptureDecision.autoAccept(det))
+        val faces = CaptureDecision.pickerFaces(det)
+        assertEquals(2, faces.first)
+        assertEquals(1, faces.second)
     }
 
     private fun scene(rail: Boolean, dice: Boolean, second: Boolean = true): RgbImage {

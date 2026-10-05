@@ -79,6 +79,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.srrtracker.camera.AutoCapture
 import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.decodePips
+import com.srrtracker.ui.LiveResult
 import com.srrtracker.ui.PendingCheck
 import com.srrtracker.ui.RollRow
 import com.srrtracker.ui.SessionSummary
@@ -250,6 +251,7 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
                 modifier = Modifier.fillMaxSize()
             )
             FramingOverlay(state.diceInBox, state.frame, vm::setFrame, Modifier.fillMaxSize())
+            state.liveResult?.let { ResultFlash(it) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = { vm.nudgeZoom(-0.15f) }) { Text("−", color = Ink, fontSize = 28.sp) }
@@ -334,6 +336,35 @@ private fun RollLine(row: RollRow, onClick: () -> Unit) {
                 modifier = Modifier.weight(1f)
             )
             Text(row.ratio, color = Ink, fontSize = 22.sp)
+        }
+    }
+}
+
+@Composable
+private fun ResultFlash(result: LiveResult) {
+    val bmp = remember(result.thumb) {
+        BitmapFactory.decodeByteArray(result.thumb, 0, result.thumb.size)
+    }
+    Box(Modifier.fillMaxSize()) {
+        Text(
+            result.total.toString(),
+            color = if (result.seven) Seven else Color.White,
+            fontSize = 84.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.align(Alignment.Center)
+        )
+        if (bmp != null) {
+            Image(
+                bmp.asImageBitmap(),
+                contentDescription = "Last roll",
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .width(72.dp)
+                    .height(56.dp)
+                    .background(Color.Black, RoundedCornerShape(8.dp)),
+                contentScale = ContentScale.Fit
+            )
         }
     }
 }
