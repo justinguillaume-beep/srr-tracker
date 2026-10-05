@@ -175,13 +175,21 @@ object ColoredDiceReader {
             }
         }
         val boxes = ArrayList<Box>()
-        boxes += components(close(purple, sw, sh, 1), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, null)
+        // Radius 1 keeps two nearby purple dice apart. A six has more pip holes
+        // than a four, and those holes can leave the body in pieces too small to
+        // keep. Radius 3 joins the pieces. That box is added only when half of it
+        // was already purple, so a close around a speck is not a die, and only
+        // when it is not already one of the tighter boxes.
+        val purpleTight = components(close(purple, sw, sh, 1), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, null)
+        val purpleWide = components(close(purple, sw, sh, 3), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, purple, 5)
+        boxes += purpleTight
         // Gold dice are translucent, so the yellow mask is full of pip holes.
         // A wider close joins those holes without lowering the yellow threshold.
         boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, xScale, yScale, image.width, image.height, 0.27f, yellowCore)
         // Red/pink dice are translucent too. Close radius 2 fills pip holes
         // without pulling in the warm grey cloth (that stays under the margin).
         boxes += components(close(red, sw, sh, 2), sw, sh, 'R', scale, xScale, yScale, image.width, image.height, 0.28f, redCore)
+        boxes += purpleWide.filter { wide -> boxes.none { overlapsDie(it, wide) } }
         return dropSizeOutliers(dropContained(mergeSameColor(boxes)))
     }
 
@@ -218,7 +226,8 @@ object ColoredDiceReader {
         fullW: Int,
         fullH: Int,
         minFill: Float,
-        core: BooleanArray?
+        core: BooleanArray?,
+        coreTenths: Int = 1
     ): List<Box> {
         val minSide = (32f / scale).toInt().coerceIn(10, 48)
         val maxSide = (200f / scale).toInt().coerceIn(minSide + 8, 480)
@@ -258,7 +267,7 @@ object ColoredDiceReader {
             // Split that blob at its narrow waist. A blob we already accept is left whole.
             if ((bw > maxSide && bh in minSide..maxSide) || (bh > maxSide && bw in minSide..maxSide)) {
                 for (span in splitTouching(pix, area, w, bw > maxSide, minSide, maxSide)) {
-                    consider(out, span, kind, xScale, yScale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill, w, core)
+                    consider(out, span, kind, xScale, yScale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill, w, core, coreTenths)
                 }
                 continue
             }
@@ -267,7 +276,7 @@ object ColoredDiceReader {
             val aspect = bw.toFloat() / bh
             val fill = area.toFloat() / (bw * bh)
             if (aspect !in 0.55f..1.80f || fill < minFill) continue
-            if (!saturatedCore(core, pix, area)) continue
+            if (!saturatedCore(core, pix, area, coreTenths)) continue
             out += toBox(minX, minY, maxX, maxY, area, kind, xScale, yScale, fullW, fullH)
         }
         return out
@@ -360,7 +369,8 @@ object ColoredDiceReader {
         maxArea: Int,
         minFill: Float,
         imageW: Int,
-        core: BooleanArray?
+        core: BooleanArray?,
+        coreTenths: Int
     ) {
         val bw = span.x1 - span.x0 + 1
         val bh = span.y1 - span.y0 + 1
@@ -369,17 +379,17 @@ object ColoredDiceReader {
         val aspect = bw.toFloat() / bh
         val fill = span.area.toFloat() / (bw * bh)
         if (aspect !in 0.55f..1.80f || fill < minFill) return
-        if (core != null && !spanHasCore(core, imageW, span)) return
+        if (core != null && !spanHasCore(core, imageW, span, coreTenths)) return
         out += toBox(span.x0, span.y0, span.x1, span.y1, span.area, kind, xScale, yScale, fullW, fullH)
     }
 
-    private fun spanHasCore(core: BooleanArray, imageW: Int, span: Span): Boolean {
+    private fun spanHasCore(core: BooleanArray, imageW: Int, span: Span, coreTenths: Int): Boolean {
         var c = 0
         for (y in span.y0..span.y1) {
             val row = y * imageW
             for (x in span.x0..span.x1) if (core[row + x]) c++
         }
-        return c >= 8 && c * 10 >= span.area
+        return c >= 8 && c * 10 >= span.area * coreTenths
     }
 
     private fun toBox(
@@ -405,11 +415,23 @@ object ColoredDiceReader {
      * Gold and red dice are saturated. Tan clutter can cross the cut and then
      * stop, so a kept die has to contain a brighter core of the same hue.
      */
-    private fun saturatedCore(core: BooleanArray?, pix: IntArray, n: Int): Boolean {
+    private fun saturatedCore(core: BooleanArray?, pix: IntArray, n: Int, coreTenths: Int): Boolean {
         if (core == null || n <= 0) return true
         var c = 0
         for (k in 0 until n) if (core[pix[k]]) c++
-        return c >= 8 && c * 10 >= n
+        return c >= 8 && c * 10 >= n * coreTenths
+    }
+
+    /** Two boxes are the same die when they share half of the smaller one. */
+    private fun overlapsDie(a: Box, b: Box): Boolean {
+        val x0 = max(a.x, b.x)
+        val y0 = max(a.y, b.y)
+        val x1 = min(a.x + a.w, b.x + b.w)
+        val y1 = min(a.y + a.h, b.y + b.h)
+        if (x1 <= x0 || y1 <= y0) return false
+        val inter = (x1 - x0) * (y1 - y0)
+        val smaller = min(a.w * a.h, b.w * b.h)
+        return inter * 2 >= smaller
     }
 
     /** A small blob whose center sits inside a larger die is a fringe, not a second die. */
@@ -629,7 +651,105 @@ object ColoredDiceReader {
         // A fat glare streak can hide one pip of a 4. A wider open shrinks that
         // streak onto the pip. A face that already read stays as it was.
         val wider = readBlobsAt(face, 2)
-        return if (wider.count in 1..6) wider else opened
+        if (wider.count in 1..6) return wider
+        // Glare can weld two pips into one blob and hide a six. The centers of
+        // the round cores are still there. Only a face that read nothing gets here.
+        val peaked = readPeaks(face)
+        return if (peaked.count == 6) peaked else opened
+    }
+
+    /**
+     * Centers of the white cores. A pip welded to its neighbor still has its own
+     * center, which a connected-component count misses. Used only after the blob
+     * count failed, and only a six is accepted.
+     */
+    private fun readPeaks(face: RgbImage): BlobFace {
+        val w = face.width
+        val h = face.height
+        val nms = max(6, min(w, h) / 8)
+        val minR = max(4, min(w, h) / 14)
+        val nms2 = nms * nms
+        var bestScore = -1e9f
+        var best = BlobFace(0, false, 0f, emptyList())
+        for (thr in intArrayOf(208, 222, 236)) {
+            val mask = BooleanArray(w * h)
+            for (i in mask.indices) {
+                val r = face.red(i)
+                val g = face.green(i)
+                val b = face.blue(i)
+                val mn = min(r, min(g, b))
+                val mx = max(r, max(g, b))
+                mask[i] = mn >= thr && mx - mn < 78
+            }
+            val dist = IntArray(mask.size) { Int.MAX_VALUE }
+            val qx = IntArray(mask.size)
+            val qy = IntArray(mask.size)
+            var qt = 0
+            for (i in mask.indices) {
+                if (!mask[i]) {
+                    dist[i] = 0
+                    qx[qt] = i % w
+                    qy[qt] = i / w
+                    qt++
+                }
+            }
+            var qh = 0
+            while (qh < qt) {
+                val x = qx[qh]
+                val y = qy[qh]
+                val d = dist[y * w + x]
+                qh++
+                for (dy in -1..1) {
+                    val yy = y + dy
+                    if (yy !in 0 until h) continue
+                    for (dx in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val xx = x + dx
+                        if (xx !in 0 until w) continue
+                        val j = yy * w + xx
+                        if (dist[j] != Int.MAX_VALUE) continue
+                        dist[j] = d + 1
+                        qx[qt] = xx
+                        qy[qt] = yy
+                        qt++
+                    }
+                }
+            }
+            val order = ArrayList<Int>()
+            for (i in dist.indices) if (dist[i] in minR..10_000) order.add(i)
+            order.sortByDescending { dist[it] }
+            val maxR = if (order.isEmpty()) 0 else dist[order[0]]
+            val peaks = ArrayList<Blob>()
+            for (i in order) {
+                // A shoulder of the brightest pip is smaller than the pip itself.
+                if (dist[i] * 4 < maxR * 3) continue
+                val x = i % w
+                val y = i / w
+                val nx = (x + 0.5f) / w
+                val ny = (y + 0.5f) / h
+                if (nx !in 0.08f..0.92f || ny !in 0.08f..0.92f) continue
+                var close = false
+                for (p in peaks) {
+                    val dx = (p.nx - nx) * w
+                    val dy = (p.ny - ny) * h
+                    if (dx * dx + dy * dy < nms2) {
+                        close = true
+                        break
+                    }
+                }
+                if (close) continue
+                peaks += Blob(dist[i], nx, ny, 1f, 1f)
+                if (peaks.size > 6) break
+            }
+            if (peaks.size != 6 || geometry(peaks) != 6) continue
+            val inset = peaks.all { it.nx in 0.12f..0.86f && it.ny in 0.12f..0.86f }
+            val score = 70f + (if (inset) 20f else 0f) + thr / 10f
+            if (score > bestScore) {
+                bestScore = score
+                best = BlobFace(6, inset, if (inset) 1f else 0f, peaks.map { it.nx to it.ny })
+            }
+        }
+        return best
     }
 
     private fun readBlobsAt(face: RgbImage, openRadius: Int): BlobFace {
@@ -817,6 +937,27 @@ object ColoredDiceReader {
             val xs = blobs.map { it.nx }.sorted()
             val ys = blobs.map { it.ny }.sorted()
             if (grouped(xs) || grouped(ys)) return 6
+            // A turned six is still two columns of three. The same grouping
+            // test is tried after rotating the pips. An axis-aligned six
+            // already returned above.
+            val cx = blobs.sumOf { it.nx.toDouble() }.toFloat() / 6f
+            val cy = blobs.sumOf { it.ny.toDouble() }.toFloat() / 6f
+            val rx = FloatArray(6)
+            val ry = FloatArray(6)
+            for (step in 1 until 18) {
+                val ang = step * Math.PI / 18.0
+                val cos = kotlin.math.cos(ang).toFloat()
+                val sin = kotlin.math.sin(ang).toFloat()
+                for (i in 0 until 6) {
+                    val dx = blobs[i].nx - cx
+                    val dy = blobs[i].ny - cy
+                    rx[i] = cos * dx - sin * dy
+                    ry[i] = sin * dx + cos * dy
+                }
+                rx.sort()
+                ry.sort()
+                if (grouped(rx.toList()) || grouped(ry.toList())) return 6
+            }
         }
         return 0
     }

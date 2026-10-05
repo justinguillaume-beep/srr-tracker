@@ -24,8 +24,24 @@ import java.io.InputStream
  * On d1e4f113 the gold face reads 6. Other faces on those two photos are glare, shadow,
  * or a clipped box, so only the die count and those two gold reads are asserted.
  * 5b225ec2… twelve dice, every top face 4 (see the sibling .label file).
+ * 8f670b88… twelve dice, every top face 6 (see the sibling .label file).
  */
 class RealDicePhotoTest {
+    @Test
+    fun twelveSixesAreAllFoundAndReadAsSix() {
+        val stem = "8f670b88fc95303a98670fb9e60479769ba241297e7686565f86aef39e9fe8cc"
+        val label = loadLabel("$stem.label")
+        assertEquals(6, label.face)
+        assertEquals(12, label.dice)
+        val det = ColoredDiceReader.read(load("$stem.jpg"))
+        val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+        println("SIXES dice=${det.dice.size} ok=${det.ok} reason=${det.reason} boxes=$boxes")
+        println("  sizes ${ColoredDiceReader.lastSizeLog}")
+        assertEquals("found ${det.dice.size}: $boxes", label.dice, det.dice.size)
+        val matched = det.dice.count { it.count == label.face }
+        assertEquals("read as ${label.face}: $matched of ${det.dice.size} boxes=$boxes", label.dice, matched)
+    }
+
     @Test
     fun twelveFoursAreAllFoundAndReadAsFour() {
         val stem = "5b225ec207de1be1e8fd2427919642fb0c7bc4b8630598af0a8f92a7eeffcce7"
