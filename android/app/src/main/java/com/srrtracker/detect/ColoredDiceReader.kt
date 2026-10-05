@@ -655,7 +655,12 @@ object ColoredDiceReader {
         // Glare can weld two pips into one blob and hide a six. The centers of
         // the round cores are still there. Only a face that read nothing gets here.
         val peaked = readPeaks(face)
-        return if (peaked.count == 6) peaked else opened
+        if (peaked.count == 6) return peaked
+        // A washed five can hide one corner in the rim glare. The other four
+        // cores (including the center) are still there. Only a face that read
+        // nothing gets here.
+        val five = readQuincunx(face)
+        return if (five.count == 5) five else opened
     }
 
     /**
@@ -672,49 +677,7 @@ object ColoredDiceReader {
         var bestScore = -1e9f
         var best = BlobFace(0, false, 0f, emptyList())
         for (thr in intArrayOf(208, 222, 236)) {
-            val mask = BooleanArray(w * h)
-            for (i in mask.indices) {
-                val r = face.red(i)
-                val g = face.green(i)
-                val b = face.blue(i)
-                val mn = min(r, min(g, b))
-                val mx = max(r, max(g, b))
-                mask[i] = mn >= thr && mx - mn < 78
-            }
-            val dist = IntArray(mask.size) { Int.MAX_VALUE }
-            val qx = IntArray(mask.size)
-            val qy = IntArray(mask.size)
-            var qt = 0
-            for (i in mask.indices) {
-                if (!mask[i]) {
-                    dist[i] = 0
-                    qx[qt] = i % w
-                    qy[qt] = i / w
-                    qt++
-                }
-            }
-            var qh = 0
-            while (qh < qt) {
-                val x = qx[qh]
-                val y = qy[qh]
-                val d = dist[y * w + x]
-                qh++
-                for (dy in -1..1) {
-                    val yy = y + dy
-                    if (yy !in 0 until h) continue
-                    for (dx in -1..1) {
-                        if (dx == 0 && dy == 0) continue
-                        val xx = x + dx
-                        if (xx !in 0 until w) continue
-                        val j = yy * w + xx
-                        if (dist[j] != Int.MAX_VALUE) continue
-                        dist[j] = d + 1
-                        qx[qt] = xx
-                        qy[qt] = yy
-                        qt++
-                    }
-                }
-            }
+            val dist = whiteDist(face, thr)
             val order = ArrayList<Int>()
             for (i in dist.indices) if (dist[i] in minR..10_000) order.add(i)
             order.sortByDescending { dist[it] }
@@ -750,6 +713,129 @@ object ColoredDiceReader {
             }
         }
         return best
+    }
+
+    /**
+     * A five whose corner pip is dimmer than the other four. The bright cores
+     * must include the center, and the three outer cores must sit on one ring.
+     * The missing corner is the spot that balances that ring. A dimmer core is
+     * accepted only when it is the only peak sitting there.
+     */
+    private fun readQuincunx(face: RgbImage): BlobFace {
+        val w = face.width
+        val h = face.height
+        val nms = max(6, min(w, h) / 8)
+        val nms2 = nms * nms
+        val minR = max(3, min(w, h) / 22)
+        for (thr in intArrayOf(208, 222, 236)) {
+            val dist = whiteDist(face, thr)
+            val order = ArrayList<Int>()
+            for (i in dist.indices) {
+                if (dist[i] !in minR..10_000) continue
+                val nx = (i % w + 0.5f) / w
+                val ny = (i / w + 0.5f) / h
+                if (nx !in 0.08f..0.92f || ny !in 0.08f..0.92f) continue
+                order.add(i)
+            }
+            order.sortByDescending { dist[it] }
+            if (order.isEmpty()) continue
+            val maxR = dist[order[0]]
+            val peaks = ArrayList<Blob>()
+            for (i in order) {
+                if (dist[i] * 2 < maxR) continue
+                val nx = (i % w + 0.5f) / w
+                val ny = (i / w + 0.5f) / h
+                var close = false
+                for (p in peaks) {
+                    val dx = (p.nx - nx) * w
+                    val dy = (p.ny - ny) * h
+                    if (dx * dx + dy * dy < nms2) {
+                        close = true
+                        break
+                    }
+                }
+                if (close) continue
+                peaks += Blob(dist[i], nx, ny, 1f, 1f)
+                if (peaks.size > 8) break
+            }
+            val strong = peaks.filter { it.area * 4 >= maxR * 3 }
+            if (strong.size != 4) continue
+            val cx = strong.sumOf { it.nx.toDouble() }.toFloat() / 4f
+            val cy = strong.sumOf { it.ny.toDouble() }.toFloat() / 4f
+            val center = strong.minBy { hypot(it.nx, it.ny, cx, cy) }
+            if (hypot(center.nx, center.ny, cx, cy) > 0.16f) continue
+            val outers = strong.filter { it != center }
+            val radii = outers.map { hypot(it.nx, it.ny, center.nx, center.ny) }
+            if (radii.max() - radii.min() > 0.14f) continue
+            val predX = center.nx - outers.sumOf { (it.nx - center.nx).toDouble() }.toFloat()
+            val predY = center.ny - outers.sumOf { (it.ny - center.ny).toDouble() }.toFloat()
+            if (predX !in 0.02f..0.98f || predY !in 0.02f..0.98f) continue
+            val ring = radii.average().toFloat()
+            val hits = peaks.filter { extra ->
+                extra !in strong &&
+                    hypot(extra.nx, extra.ny, predX, predY) <= 0.12f &&
+                    abs(hypot(extra.nx, extra.ny, center.nx, center.ny) - ring) <= 0.14f
+            }
+            if (hits.size != 1 || geometry(strong + hits[0]) != 5) continue
+            return BlobFace(5, false, 0f, (strong + hits[0]).map { it.nx to it.ny })
+        }
+        return BlobFace(0, false, 0f, emptyList())
+    }
+
+    /** Chessboard distance inside the white mask. A non-white pixel is 0. */
+    private fun whiteDist(face: RgbImage, thr: Int): IntArray {
+        val w = face.width
+        val h = face.height
+        val mask = BooleanArray(w * h)
+        for (i in mask.indices) {
+            val r = face.red(i)
+            val g = face.green(i)
+            val b = face.blue(i)
+            val mn = min(r, min(g, b))
+            val mx = max(r, max(g, b))
+            mask[i] = mn >= thr && mx - mn < 78
+        }
+        val dist = IntArray(mask.size) { Int.MAX_VALUE }
+        val qx = IntArray(mask.size)
+        val qy = IntArray(mask.size)
+        var qt = 0
+        for (i in mask.indices) {
+            if (!mask[i]) {
+                dist[i] = 0
+                qx[qt] = i % w
+                qy[qt] = i / w
+                qt++
+            }
+        }
+        var qh = 0
+        while (qh < qt) {
+            val x = qx[qh]
+            val y = qy[qh]
+            val d = dist[y * w + x]
+            qh++
+            for (dy in -1..1) {
+                val yy = y + dy
+                if (yy !in 0 until h) continue
+                for (dx in -1..1) {
+                    if (dx == 0 && dy == 0) continue
+                    val xx = x + dx
+                    if (xx !in 0 until w) continue
+                    val j = yy * w + xx
+                    if (dist[j] != Int.MAX_VALUE) continue
+                    dist[j] = d + 1
+                    qx[qt] = xx
+                    qy[qt] = yy
+                    qt++
+                }
+            }
+        }
+        return dist
+    }
+
+    private fun hypot(nx: Float, ny: Float, cx: Float, cy: Float): Float {
+        val dx = nx - cx
+        val dy = ny - cy
+        return sqrt(dx * dx + dy * dy)
     }
 
     private fun readBlobsAt(face: RgbImage, openRadius: Int): BlobFace {
