@@ -39,6 +39,8 @@ class RealDicePhotoTest {
             val faces = det.dice.joinToString(",") { it.count.toString() }
             val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
             println("$name dice=${det.dice.size} ok=${det.ok} reason=${det.reason} faces=$faces boxes=$boxes")
+            println("  sizes ${ColoredDiceReader.lastSizeLog}")
+            assertTrue("$name counted pips on an enlarged full-res crop", ColoredDiceReader.lastSizeLog.contains("up "))
             assertEquals(name, n, det.dice.size)
             if (name.startsWith("3643033e")) {
                 assertTrue("amber die should read 6, faces=$faces", det.dice.any { it.count == 6 })
@@ -102,6 +104,28 @@ class RealDicePhotoTest {
         val empty = ColoredDiceReader.read(image, NormRect(0.02f, 0.02f, 0.18f, 0.18f))
         assertEquals(0, empty.dice.size)
         assertEquals("found 0 dice", empty.reason)
+    }
+
+    @Test
+    fun phoneScreenshotsAreUiPhotosNotFullSensorStills() {
+        val names = listOf(
+            "preview-dice-seen.jpg",
+            "preview-holding.jpg",
+            "unread-two.jpg",
+            "unread-three.jpg"
+        )
+        for (name in names) {
+            val stream = javaClass.classLoader.getResourceAsStream("ui/$name")
+                ?: error("missing ui/$name")
+            val image = decodeJpeg(stream)
+            val det = ColoredDiceReader.read(image)
+            val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+            println(
+                "ui $name ${image.width}x${image.height} dice=${det.dice.size} ok=${det.ok} " +
+                    "reason=${det.reason} faces=${det.dice.joinToString(",") { it.count.toString() }} boxes=$boxes"
+            )
+            println("  sizes ${ColoredDiceReader.lastSizeLog}")
+        }
     }
 
     private fun load(name: String): RgbImage {

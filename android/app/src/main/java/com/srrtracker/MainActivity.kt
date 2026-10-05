@@ -248,7 +248,25 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
             )
             FramingOverlay(state.diceInBox, state.frame, vm::setFrame, Modifier.fillMaxSize())
         }
-        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { vm.nudgeZoom(-0.15f) }) { Text("−", color = Ink, fontSize = 28.sp) }
+            Slider(
+                value = state.zoom.coerceIn(state.zoomMin, state.zoomMax.coerceAtLeast(state.zoomMin)),
+                onValueChange = { vm.setZoom(it) },
+                valueRange = state.zoomMin..state.zoomMax.coerceAtLeast(state.zoomMin + 0.01f),
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = { vm.nudgeZoom(0.15f) }) { Text("+", color = Ink, fontSize = 28.sp) }
+        }
+        if (state.diePx != null && state.diePx < 60) {
+            Text(
+                "Dice look small (${state.diePx} px): zoom in or move the phone closer.",
+                color = Seven,
+                fontSize = 16.sp
+            )
+            BigButton("Auto-zoom", { vm.autoZoom() }, Modifier.fillMaxWidth(), primary = false)
+        }
+        Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             BigButton(
                 if (state.running) "Pause" else "Start",
@@ -489,9 +507,14 @@ private fun SettingsDialog(vm: TrackerViewModel, state: UiState) {
             )
             Text(String.format("%.1f seconds", state.settleMs / 1000f), color = Muted, fontSize = 16.sp)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Beep on each roll", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                Text("Sounds", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
                 Switch(checked = state.soundOn, onCheckedChange = { vm.setSound(it) })
             }
+            Text(
+                "On by default. A short beep for a clear roll, a low buzz when the total is 7, and two descending tones when it cannot tell. A 7 does not also beep.",
+                color = Muted,
+                fontSize = 16.sp
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Save a marked photo", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
                 Switch(checked = state.markPhotos, onCheckedChange = { vm.setMarkPhotos(it) })
@@ -545,7 +568,8 @@ private fun CameraPane(vm: TrackerViewModel, running: Boolean, modifier: Modifie
             onFrame = vm::onFrame,
             onStill = vm::onCaptured,
             onReady = vm::onCameraReady,
-            onError = vm::onCameraError
+            onError = vm::onCameraError,
+            onZoomRange = vm::onZoomRange
         )
     }
     SideEffect {
@@ -553,6 +577,7 @@ private fun CameraPane(vm: TrackerViewModel, running: Boolean, modifier: Modifie
         capture.gate.settleMs = state.settleMs
         capture.gate.running = running
         capture.gate.frame = state.frame
+        if (capture.zoomRatio != state.zoom) capture.zoomRatio = state.zoom
     }
     LaunchedEffect(state.manualCapture) {
         if (state.manualCapture) {

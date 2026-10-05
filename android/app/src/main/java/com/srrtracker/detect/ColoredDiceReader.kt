@@ -15,7 +15,14 @@ import kotlin.math.sqrt
  * Only pixels inside [roi] are looked at. A null roi is the whole photo.
  */
 object ColoredDiceReader {
+    /**
+     * Per-die sizes from the last [read]: full-resolution crop, then the
+     * upscaled face the pip counter actually used. Empty if nothing was found.
+     */
+    var lastSizeLog: String = ""
+
     fun read(image: RgbImage, roi: NormRect? = null): DiceDetector.Detection {
+        lastSizeLog = ""
         val t0 = System.nanoTime()
         val bounds = pixelRoi(image, roi)
         val work = if (bounds.x == 0 && bounds.y == 0 && bounds.w == image.width && bounds.h == image.height) {
@@ -27,6 +34,7 @@ object ColoredDiceReader {
             box.copy(x = box.x + bounds.x, y = box.y + bounds.y)
         }.sortedWith(compareBy({ it.y }, { it.x }))
         val reads = located.map { countWhitePips(image, it) }
+        lastSizeLog = reads.joinToString(" | ") { it.sizeLog }
         val marks = reads.map { it.mark }
         val ms = (System.nanoTime() - t0) / 1_000_000
         if (located.size != 2) {
@@ -120,7 +128,8 @@ object ColoredDiceReader {
         val clear: Boolean,
         val margin: Float,
         val mark: DiceDetector.DieMark,
-        val pips: List<DiceDetector.PipMark>
+        val pips: List<DiceDetector.PipMark>,
+        val sizeLog: String
     )
 
     private fun locate(image: RgbImage): List<Box> {
@@ -434,8 +443,25 @@ object ColoredDiceReader {
      * rim, so they are not pips. A lone glare spot is not logged as a 1.
      */
     private fun countWhitePips(image: RgbImage, die: Box): PipRead {
+        // The box is in full-resolution pixels. The 1600px image is only the
+        // color mask used to find the box. Pips are counted on this crop.
         val crop = ImageOps.crop(image, die.x, die.y, die.w, die.h)
-        val face = topFace(crop)
+        val face0 = topFace(crop)
+        val short = min(face0.width, face0.height)
+        // A 3× enlargement of a face that is already ~100px turns extra glare into
+        // pips (the gold 3 on 5ec3a0f2 became a 6). Enlarge only the small faces,
+        // where a 3×3 open would otherwise erase the pips. Larger faces stay at
+        // the full-resolution crop.
+        val factor = when {
+            short < 48 -> 4
+            short < 80 -> 3
+            else -> 1
+        }
+        val face = if (factor == 1) {
+            face0
+        } else {
+            ImageOps.scale(face0, (face0.width * factor).coerceAtLeast(1), (face0.height * factor).coerceAtLeast(1))
+        }
         val read = readBlobs(face)
         val pips = ArrayList<DiceDetector.PipMark>()
         for ((nx, ny) in read.points) {
@@ -451,7 +477,8 @@ object ColoredDiceReader {
             clear = read.clear,
             margin = read.margin,
             mark = DiceDetector.DieMark(die.x, die.y, die.w, die.h, read.count),
-            pips = pips
+            pips = pips,
+            sizeLog = "crop ${die.w}x${die.h} face ${face0.width}x${face0.height} up ${factor}x -> ${face.width}x${face.height}"
         )
     }
 

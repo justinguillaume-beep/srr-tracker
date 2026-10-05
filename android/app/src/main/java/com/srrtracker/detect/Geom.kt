@@ -8,6 +8,19 @@ object FrameTarget {
     const val BOTTOM = 0.82f
 }
 
+/**
+ * Default camera box. Tighter than [FrameTarget], which the classic detector
+ * still uses as a center crop for synthetic white and red dice.
+ */
+object CameraBox {
+    const val LEFT = 0.30f
+    const val TOP = 0.32f
+    const val RIGHT = 0.70f
+    const val BOTTOM = 0.68f
+
+    fun asRect() = NormRect(LEFT, TOP, RIGHT, BOTTOM)
+}
+
 data class NormRect(
     val left: Float,
     val top: Float,

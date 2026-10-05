@@ -33,6 +33,13 @@ fun Bitmap.toRgbImage(): RgbImage {
     return RgbImage(width, height, pixels)
 }
 
+/** Full-size JPEG of an already-upright bitmap. Does not shrink the photo. */
+fun fullJpeg(bitmap: Bitmap, quality: Int = 92): ByteArray {
+    val out = ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+    return out.toByteArray()
+}
+
 fun downscaledJpeg(bitmap: Bitmap, maxEdge: Int = 1280, quality: Int = 74): ByteArray {
     val long = max(bitmap.width, bitmap.height)
     val scaled = if (long <= maxEdge) {

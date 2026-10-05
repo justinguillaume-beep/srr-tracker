@@ -43,7 +43,7 @@ class MotionGate(
     private var stampSettleOnNext = false
 
     /** The on-screen box. Detection and "dice in the box" use only this rectangle. */
-    var frame: NormRect = NormRect(FrameTarget.LEFT, FrameTarget.TOP, FrameTarget.RIGHT, FrameTarget.BOTTOM)
+    var frame: NormRect = CameraBox.asRect()
 
     var running: Boolean = false
         set(value) {

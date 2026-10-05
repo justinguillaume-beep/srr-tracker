@@ -8,11 +8,14 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.srrtracker.camera.StillCapture
 import com.srrtracker.camera.rgbToJpeg
 import com.srrtracker.data.AppDatabase
 import com.srrtracker.data.PhotoStore
 import com.srrtracker.data.RollEntity
 import com.srrtracker.data.Session
+import com.srrtracker.detect.CameraBox
+import com.srrtracker.detect.ColoredDiceReader
 import com.srrtracker.detect.DebugMarks
 import com.srrtracker.detect.DiceDetector
 import com.srrtracker.detect.FrameTarget
@@ -36,7 +39,9 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 import java.io.File
 import java.time.Instant
 import java.time.ZoneId
@@ -93,14 +98,18 @@ data class UiState(
     val sessions: List<SessionSummary> = emptyList(),
     val sensitivity: Int = 50,
     val settleMs: Long = 500L,
-    val soundOn: Boolean = false,
+    val soundOn: Boolean = true,
     val markPhotos: Boolean = true,
     val saveDieCrops: Boolean = true,
     val sessionName: String = "",
     val cameraMessage: String? = null,
     val busy: Boolean = false,
     val manualCapture: Boolean = false,
-    val frame: NormRect = NormRect(FrameTarget.LEFT, FrameTarget.TOP, FrameTarget.RIGHT, FrameTarget.BOTTOM)
+    val frame: NormRect = CameraBox.asRect(),
+    val zoom: Float = 1f,
+    val zoomMin: Float = 1f,
+    val zoomMax: Float = 8f,
+    val diePx: Int? = null
 )
 
 sealed interface UiEffect {
@@ -112,7 +121,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     private val db = AppDatabase.get(app)
     private val photos = PhotoStore(app)
     private val prefs = app.getSharedPreferences("srr", Application.MODE_PRIVATE)
-    private val feedback = RollFeedback()
+    private val feedback = RollFeedback(app)
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
@@ -130,15 +139,11 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         val guide = prefs.getBoolean(KEY_GUIDE, false)
         val sensitivity = prefs.getInt(KEY_SENS, 50)
         val settle = prefs.getLong(KEY_SETTLE, 500L)
-        val sound = prefs.getBoolean(KEY_SOUND, false)
+        val sound = prefs.getBoolean(KEY_SOUNDS, true)
         val mark = prefs.getBoolean(KEY_MARK, true)
         val crops = prefs.getBoolean(KEY_CROPS, true)
-        val frame = NormRect(
-            left = prefs.getFloat(KEY_FRAME_L, FrameTarget.LEFT),
-            top = prefs.getFloat(KEY_FRAME_T, FrameTarget.TOP),
-            right = prefs.getFloat(KEY_FRAME_R, FrameTarget.RIGHT),
-            bottom = prefs.getFloat(KEY_FRAME_B, FrameTarget.BOTTOM)
-        )
+        val zoom = prefs.getFloat(KEY_ZOOM, 1f)
+        val frame = loadFrame()
         _ui.update {
             it.copy(
                 guideDone = guide,
@@ -148,6 +153,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 markPhotos = mark,
                 saveDieCrops = crops,
                 frame = frame,
+                zoom = zoom,
                 status = if (guide) "Paused" else "Starting camera..."
             )
         }
@@ -216,8 +222,15 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         showFlash("Could not read the dice. $message", false)
     }
 
-    fun onCaptured(image: RgbImage, jpeg: ByteArray, roi: NormRect?) {
-        Log.i(TAG, "photo received ${image.width}x${image.height}")
+    fun onCaptured(shot: StillCapture) {
+        val image = shot.image
+        val jpeg = shot.jpeg
+        val roi = shot.roi
+        Log.i(
+            TAG,
+            "photo received still ${image.width}x${image.height} raw ${shot.rawW}x${shot.rawH} " +
+                "preview view ${shot.previewViewW}x${shot.previewViewH} stream ${shot.previewStream}"
+        )
         val state = _ui.value
         if (!state.running || state.pending != null) {
             Log.w(TAG, "photo dropped running=${state.running} pending=${state.pending != null}")
@@ -239,10 +252,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                     Log.e(TAG, "detect failed", t)
                     null
                 }
+                val px = medianDiePx(det)
                 Log.i(
                     TAG,
-                    "detect ok=${det?.ok} conf=${det?.confidence} total=${det?.total} reason=${det?.reason} hint=${det?.hint}"
+                    "detect ok=${det?.ok} conf=${det?.confidence} total=${det?.total} reason=${det?.reason} " +
+                        "hint=${det?.hint} diePx=$px crops=${ColoredDiceReader.lastSizeLog} " +
+                        "still ${image.width}x${image.height} preview ${shot.previewViewW}x${shot.previewViewH} stream ${shot.previewStream}"
                 )
+                _ui.update { it.copy(diePx = px) }
                 if (!_ui.value.running) {
                     _ui.update { it.copy(busy = false) }
                     publishLiveStatus()
@@ -253,10 +270,13 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                     val saved = saveRoll(det!!.d1!!, det.d2!!, jpeg, image, det, userChanged = false, unread = false, reason = null)
                     if (saved <= 0) {
                         showFlash("Could not read the dice. No session is open.", false)
+                    } else {
+                        feedback.onClearRead(det.total == 7, _ui.value.soundOn)
                     }
                     _ui.update { it.copy(busy = false) }
                 } else {
-                    val reason = readFailureReason(det)
+                    val reason = readFailureReason(det, shot, px)
+                    feedback.onUnread(_ui.value.soundOn)
                     val rollId = saveRoll(0, 0, jpeg, image, det, userChanged = false, unread = true, reason = reason)
                     openedCheck = true
                     _ui.update {
@@ -473,8 +493,45 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setSound(on: Boolean) {
-        prefs.edit().putBoolean(KEY_SOUND, on).apply()
+        prefs.edit().putBoolean(KEY_SOUNDS, on).apply()
         _ui.update { it.copy(soundOn = on) }
+    }
+
+    fun setZoom(value: Float) {
+        val state = _ui.value
+        val hi = state.zoomMax.coerceAtLeast(state.zoomMin)
+        val z = value.coerceIn(state.zoomMin, hi)
+        prefs.edit().putFloat(KEY_ZOOM, z).apply()
+        _ui.update { it.copy(zoom = z) }
+    }
+
+    fun nudgeZoom(delta: Float) {
+        setZoom(_ui.value.zoom + delta)
+    }
+
+    fun onZoomRange(minZoom: Float, maxZoom: Float) {
+        val minZ = minZoom.coerceAtLeast(1f)
+        val maxZ = maxZoom.coerceAtLeast(minZ)
+        _ui.update {
+            val z = it.zoom.coerceIn(minZ, maxZ)
+            it.copy(zoomMin = minZ, zoomMax = maxZ, zoom = z)
+        }
+        prefs.edit().putFloat(KEY_ZOOM, _ui.value.zoom).apply()
+    }
+
+    /** Zoom toward the box so a small die grows, without sliding the box off screen. */
+    fun autoZoom() {
+        val state = _ui.value
+        val contain = maxZoomContaining(state.frame)
+        val cap = min(contain, state.zoomMax).coerceAtLeast(state.zoomMin)
+        val die = state.diePx
+        val want = if (die != null && die > 0) {
+            state.zoom * (70f / die)
+        } else {
+            val span = max(state.frame.width, state.frame.height).coerceAtLeast(0.05f)
+            state.zoom * (0.55f / span)
+        }
+        setZoom(want.coerceIn(state.zoomMin, cap))
     }
 
     fun setMarkPhotos(on: Boolean) {
@@ -506,7 +563,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun resetFrame() {
-        setFrame(NormRect(FrameTarget.LEFT, FrameTarget.TOP, FrameTarget.RIGHT, FrameTarget.BOTTOM))
+        setFrame(CameraBox.asRect())
     }
 
     fun exportCsv() {
@@ -547,11 +604,55 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun readFailureReason(det: DiceDetector.Detection?): String {
-        if (det == null) return "The photo could not be read."
-        if (!det.ok) return det.reason ?: "No pips found."
-        if (det.hint.isNotBlank()) return det.hint
-        return "Not sure about this read."
+    private fun readFailureReason(det: DiceDetector.Detection?, shot: StillCapture, diePx: Int?): String {
+        val base = when {
+            det == null -> "The photo could not be read."
+            !det.ok -> det.reason ?: "No pips found."
+            det.hint.isNotBlank() -> det.hint
+            else -> "Not sure about this read."
+        }
+        val size = if (diePx != null && diePx > 0) {
+            val small = if (diePx < 60) " Dice look small: zoom in or move the phone closer." else ""
+            " Dice are $diePx px across.$small"
+        } else {
+            ""
+        }
+        return base + size + " Still ${shot.image.width}x${shot.image.height}, preview ${shot.previewViewW}x${shot.previewViewH}."
+    }
+
+    private fun medianDiePx(det: DiceDetector.Detection?): Int? {
+        val sides = det?.dice?.map { max(it.w, it.h) }?.filter { it > 0 }.orEmpty()
+        if (sides.isEmpty()) return null
+        return sides.sorted()[sides.size / 2]
+    }
+
+    private fun maxZoomContaining(roi: NormRect): Float {
+        val dx = max(0.5f - roi.left, roi.right - 0.5f).coerceAtLeast(0.02f)
+        val dy = max(0.5f - roi.top, roi.bottom - 0.5f).coerceAtLeast(0.02f)
+        return (0.5f / max(dx, dy)).coerceIn(1f, 8f)
+    }
+
+    private fun loadFrame(): NormRect {
+        if (!prefs.contains(KEY_FRAME_L)) return CameraBox.asRect()
+        val loaded = NormRect(
+            left = prefs.getFloat(KEY_FRAME_L, CameraBox.LEFT),
+            top = prefs.getFloat(KEY_FRAME_T, CameraBox.TOP),
+            right = prefs.getFloat(KEY_FRAME_R, CameraBox.RIGHT),
+            bottom = prefs.getFloat(KEY_FRAME_B, CameraBox.BOTTOM)
+        )
+        val oldDefault = abs(loaded.left - FrameTarget.LEFT) < 0.011f &&
+            abs(loaded.top - FrameTarget.TOP) < 0.011f &&
+            abs(loaded.right - FrameTarget.RIGHT) < 0.011f &&
+            abs(loaded.bottom - FrameTarget.BOTTOM) < 0.011f
+        if (!oldDefault) return loaded
+        val next = CameraBox.asRect()
+        prefs.edit()
+            .putFloat(KEY_FRAME_L, next.left)
+            .putFloat(KEY_FRAME_T, next.top)
+            .putFloat(KEY_FRAME_R, next.right)
+            .putFloat(KEY_FRAME_B, next.bottom)
+            .apply()
+        return next
     }
 
     private suspend fun saveRoll(
@@ -605,10 +706,10 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             )
         )
         if (!unread) {
-            val state = _ui.value
-            feedback.onLogged(total == 7, state.soundOn)
-            Log.i(TAG, "logged $total")
-            showFlash("Logged $total", total == 7)
+            val px = medianDiePx(det)
+            val size = if (px != null) " · ${px}px" else ""
+            Log.i(TAG, "logged $total diePx=$px")
+            showFlash("Logged $total$size", total == 7)
         } else {
             Log.i(TAG, "unread saved: $reason")
         }
@@ -637,13 +738,15 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update { it.copy(status = state.cameraMessage, statusIsSeven = false) }
             return
         }
+        val px = state.diePx
+        val size = if (px != null && px > 0) " · ${px}px" else ""
         val text = when {
             !state.running -> "Paused"
-            lastInfo?.stage == MotionGate.Stage.DICE_SEEN -> "Dice seen"
-            lastInfo?.stage == MotionGate.Stage.SETTLING -> "Holding still..."
+            lastInfo?.stage == MotionGate.Stage.DICE_SEEN -> "Dice seen$size"
+            lastInfo?.stage == MotionGate.Stage.SETTLING -> "Holding still...$size"
             lastInfo?.stage == MotionGate.Stage.CAPTURING -> "Capturing..."
-            lastInfo?.stage == MotionGate.Stage.HOLD -> "Waiting for the next roll"
-            else -> "Waiting for dice"
+            lastInfo?.stage == MotionGate.Stage.HOLD -> "Waiting for the next roll$size"
+            else -> "Waiting for dice$size"
         }
         _ui.update { it.copy(status = text, statusIsSeven = false) }
     }
@@ -721,7 +824,8 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         private const val KEY_SESSION = "sessionId"
         private const val KEY_SENS = "sensitivity"
         private const val KEY_SETTLE = "settleMs"
-        private const val KEY_SOUND = "sound"
+        private const val KEY_SOUNDS = "sounds"
+        private const val KEY_ZOOM = "zoom"
         private const val KEY_MARK = "markPhotos"
         private const val KEY_CROPS = "saveDieCrops"
         private const val KEY_FRAME_L = "frameL"
