@@ -26,8 +26,24 @@ import java.io.InputStream
  * 5b225ec2… twelve dice, every top face 4 (see the sibling .label file).
  * 8f670b88… twelve dice, every top face 6 (see the sibling .label file).
  * 5aeeae0a… twelve dice, every top face 2 (see the sibling .label file).
+ * 27be9999… twelve dice, every top face 1 (see the sibling .label file).
  */
 class RealDicePhotoTest {
+    @Test
+    fun twelveOnesAreAllFoundAndReadAsOne() {
+        val stem = "27be999994e962c5a71dba88da5f25465181c781145e07d9f2565ca8b6e5234f"
+        val label = loadLabel("$stem.label")
+        assertEquals(1, label.face)
+        assertEquals(12, label.dice)
+        val det = ColoredDiceReader.read(load("$stem.jpg"))
+        val boxes = det.dice.joinToString(" ") { "${it.w}x${it.h}@${it.x},${it.y}=${it.count}" }
+        println("ONES dice=${det.dice.size} ok=${det.ok} reason=${det.reason} boxes=$boxes")
+        println("  sizes ${ColoredDiceReader.lastSizeLog}")
+        assertEquals("found ${det.dice.size}: $boxes", label.dice, det.dice.size)
+        val matched = det.dice.count { it.count == label.face }
+        assertEquals("read as ${label.face}: $matched of ${det.dice.size} boxes=$boxes", label.dice, matched)
+    }
+
     @Test
     fun twelveTwosAreAllFoundAndReadAsTwo() {
         val stem = "5aeeae0a55f9affc4a840959f5442c9f4ea89014a8d937074758204500033531"
