@@ -9,7 +9,19 @@ import androidx.room.PrimaryKey
 data class Session(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
-    val startedAt: Long
+    val startedAt: Long,
+    val endedAt: Long? = null,
+    val tagId: Long? = null
+)
+
+@Entity(tableName = "tags")
+data class Tag(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val die1Color: Int,
+    val die2Color: Int,
+    val goal: Int? = null,
+    val sortOrder: Int = 0
 )
 
 @Entity(
@@ -40,5 +52,9 @@ data class RollEntity(
     val unread: Boolean = false,
     val readReason: String? = null,
     val debugPath: String? = null,
-    val cropPaths: String? = null
+    val cropPaths: String? = null,
+    val leftFace: Int? = null,
+    val rightFace: Int? = null,
+    val isSeven: Boolean = false,
+    val source: String = "camera"
 )

@@ -49,6 +49,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -79,14 +80,15 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.srrtracker.camera.AutoCapture
 import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.decodePips
+import com.srrtracker.stats.PracticeStats
 import com.srrtracker.ui.LiveResult
 import com.srrtracker.ui.PendingCheck
 import com.srrtracker.ui.RollRow
-import com.srrtracker.ui.SessionSummary
 import com.srrtracker.ui.TrackerViewModel
 import com.srrtracker.ui.UiEffect
 import com.srrtracker.ui.UiState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.DateFormat
@@ -101,11 +103,56 @@ class MainActivity : ComponentActivity() {
             val vm: TrackerViewModel = viewModel()
             val state by vm.ui.collectAsState()
             val context = LocalContext.current
+            val scope = rememberCoroutineScope()
+            var pendingBackup by remember { mutableStateOf<String?>(null) }
+            val saveBackup = androidx.activity.compose.rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("application/json")
+            ) { uri ->
+                val json = pendingBackup
+                pendingBackup = null
+                if (uri == null || json == null) return@rememberLauncherForActivityResult
+                scope.launch(Dispatchers.IO) {
+                    val wrote = try {
+                        context.contentResolver.openOutputStream(uri)?.use { out ->
+                            out.write(json.toByteArray(Charsets.UTF_8))
+                            true
+                        } ?: false
+                    } catch (_: Exception) {
+                        false
+                    }
+                    withContext(Dispatchers.Main) {
+                        vm.note(if (wrote) "Backup saved" else "Could not save the backup")
+                    }
+                }
+            }
+            val openBackup = androidx.activity.compose.rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri ->
+                if (uri == null) return@rememberLauncherForActivityResult
+                scope.launch(Dispatchers.IO) {
+                    val text = try {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            input.bufferedReader(Charsets.UTF_8).readText()
+                        }
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (text != null) vm.previewRestore(text)
+                }
+            }
             LaunchedEffect(vm) {
                 vm.effects.collect { effect ->
                     when (effect) {
                         is UiEffect.ShareFile -> shareCsv(context, File(effect.path))
                         is UiEffect.ShareImage -> shareImage(context, File(effect.path))
+                        is UiEffect.SaveBackup -> {
+                            pendingBackup = effect.json
+                            saveBackup.launch(effect.name)
+                        }
+                        is UiEffect.ShareBackup -> shareJson(context, File(effect.path))
+                        is UiEffect.PickRestore -> openBackup.launch(
+                            arrayOf("application/json", "text/plain", "application/octet-stream", "*/*")
+                        )
                     }
                 }
             }
@@ -120,20 +167,26 @@ class MainActivity : ComponentActivity() {
                 when {
                     !state.guideDone -> GuideScreen(vm, state)
                     state.detailId != null -> DetailScreen(vm, state)
+                    state.showManual -> ManualEntryScreen(vm, state)
+                    state.showTagManager -> TagManagerScreen(vm, state)
+                    state.showSessions -> SessionsScreen(vm, state)
                     else -> MainScreen(vm, state)
                 }
                 state.pending?.let { CheckScreen(vm, it, state.notice) }
+                if (state.confirmNew) NewSessionDialog(vm, state)
+                if (state.tagPickerFor != null) TagPickerDialog(vm, state)
+                state.restoreSummary?.let { RestoreDialog(vm, it) }
             }
         }
     }
 }
 
 private val Bg = Color(0xFF0B0B0D)
-private val Card = Color(0xFF16161A)
-private val Muted = Color(0xFFA1A1AA)
-private val Seven = Color(0xFFFF3B3B)
-private val Good = Color(0xFF3DDC84)
-private val Ink = Color(0xFFF4F4F5)
+internal val Card = Color(0xFF16161A)
+internal val Muted = Color(0xFFA1A1AA)
+internal val Seven = Color(0xFFFF3B3B)
+internal val Good = Color(0xFF3DDC84)
+internal val Ink = Color(0xFFF4F4F5)
 
 @Composable
 private fun GuideScreen(vm: TrackerViewModel, state: UiState) {
@@ -219,7 +272,14 @@ private fun GuideScreen(vm: TrackerViewModel, state: UiState) {
 private fun MainScreen(vm: TrackerViewModel, state: UiState) {
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(state.sessionName, color = Muted, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text(state.sessionName, color = Muted, fontSize = 14.sp)
+                val tag = state.tags.find { it.id == state.tagId }
+                TagChip(tag) { vm.openLiveTag() }
+            }
+            TextButton(onClick = { vm.openManual() }) {
+                Text("Rolls", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            }
             TextButton(onClick = { vm.openMenu() }) {
                 Text("Menu", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             }
@@ -311,27 +371,18 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
     }
     if (state.showMenu) MenuDialog(vm)
     if (state.showSettings) SettingsDialog(vm, state)
-    if (state.showSessions) SessionsDialog(vm, state.sessions)
-    if (state.confirmNew) {
-        AlertDialog(
-            onDismissRequest = { vm.cancelNewSession() },
-            title = { Text("Start a new session?") },
-            text = { Text("The rolls you have now stay saved under Past sessions.") },
-            confirmButton = { TextButton(onClick = { vm.confirmNewSession() }) { Text("New session") } },
-            dismissButton = { TextButton(onClick = { vm.cancelNewSession() }) { Text("Cancel") } }
-        )
-    }
 }
 
 @Composable
-private fun RollLine(row: RollRow, onClick: () -> Unit) {
+internal fun RollLine(row: RollRow, onClick: () -> Unit) {
+    val label = row.label.ifBlank { if (row.unread) "unread" else "${row.total}" }
     TextButton(onClick = onClick, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(vertical = 6.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("#${row.number}", color = Muted, fontSize = 16.sp, modifier = Modifier.width(52.dp))
             Text(
-                if (row.unread) "unread" else "${row.total}",
+                label,
                 color = if (row.isSeven) Seven else if (row.unread) Color(0xFFFFC107) else Ink,
-                fontSize = if (row.unread) 22.sp else 36.sp,
+                fontSize = if (label.length > 2) 22.sp else 36.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
@@ -532,30 +583,44 @@ private fun DetailScreen(vm: TrackerViewModel, state: UiState) {
                 }
             }
         }
-        if (roll.unread || !roll.readReason.isNullOrBlank()) {
-            Text(roll.readReason ?: "Could not read the dice.", color = Color(0xFFFFC107), fontSize = 18.sp)
-        }
-        Text("Tap a number to fix a die.", color = Muted, fontSize = 16.sp)
-        DiePicker("Left die", roll.d1.takeIf { it in 1..6 }) { vm.correctDetail(0, it) }
-        DiePicker("Right die", roll.d2.takeIf { it in 1..6 }) { vm.correctDetail(1, it) }
-        val pair = roll.d1 in 1..6 && roll.d2 in 1..6 && !roll.unread
-        if (!pair) {
+        if (roll.source == PracticeStats.SOURCE_QUICK) {
             Text(
-                "Pick both dice",
-                color = Muted,
-                fontSize = 18.sp,
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center
-            )
-        } else {
-            Text(
-                "${roll.total}",
-                color = if (roll.total == 7) Seven else Ink,
+                if (roll.isSeven) "7" else "No 7",
+                color = if (roll.isSeven) Seven else Ink,
                 fontSize = 56.sp,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Center
             )
+            Text("Quick entry. No die faces were recorded.", color = Muted, fontSize = 16.sp)
+        } else {
+            if (roll.unread || !roll.readReason.isNullOrBlank()) {
+                Text(roll.readReason ?: "Could not read the dice.", color = Color(0xFFFFC107), fontSize = 18.sp)
+            }
+            Text("Tap a number to fix a die.", color = Muted, fontSize = 16.sp)
+            val left = roll.leftFace ?: roll.d1.takeIf { it in 1..6 }
+            val right = roll.rightFace ?: roll.d2.takeIf { it in 1..6 }
+            DiePicker("Left die", left) { vm.correctDetail(0, it) }
+            DiePicker("Right die", right) { vm.correctDetail(1, it) }
+            if (left != null && right != null && !roll.unread) {
+                val total = left + right
+                Text(
+                    "$total",
+                    color = if (total == 7) Seven else Ink,
+                    fontSize = 56.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            } else {
+                Text(
+                    "Pick both dice",
+                    color = Muted,
+                    fontSize = 18.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            }
         }
         if (!state.notice.isNullOrBlank()) Text(state.notice, color = Good, fontSize = 16.sp)
         BigButton("Share last photo", { vm.shareDetailPhoto() }, Modifier.fillMaxWidth(), primary = false, enabled = roll.photoPath != null)
@@ -581,7 +646,9 @@ private fun MenuDialog(vm: TrackerViewModel) {
         ) {
             Text("Menu", color = Ink, fontSize = 28.sp, fontWeight = FontWeight.Bold)
             BigButton("New session", { vm.askNewSession() }, Modifier.fillMaxWidth())
-            BigButton("Past sessions", { vm.openSessions() }, Modifier.fillMaxWidth(), primary = false)
+            BigButton("Enter rolls", { vm.openManual() }, Modifier.fillMaxWidth(), primary = false)
+            BigButton("Sessions", { vm.openSessions() }, Modifier.fillMaxWidth(), primary = false)
+            BigButton("Tags", { vm.openTagManager() }, Modifier.fillMaxWidth(), primary = false)
             BigButton("Save spreadsheet", { vm.exportCsv(); vm.closeMenu() }, Modifier.fillMaxWidth(), primary = false)
             BigButton("Settings", { vm.openSettings() }, Modifier.fillMaxWidth(), primary = false)
             BigButton("How to set up", { vm.reopenGuide() }, Modifier.fillMaxWidth(), primary = false)
@@ -648,34 +715,17 @@ private fun SettingsDialog(vm: TrackerViewModel, state: UiState) {
             )
             Text("Drag the box onto the two dice. Drag a corner to resize it.", color = Muted, fontSize = 16.sp)
             BigButton("Reset box", { vm.resetFrame() }, Modifier.fillMaxWidth(), primary = false)
+            Text("Backup & Restore", color = Ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "One small file of sessions, rolls, tags, goals, and these settings. No photos.",
+                color = Muted,
+                fontSize = 16.sp
+            )
+            if (!state.notice.isNullOrBlank()) Text(state.notice, color = Good, fontSize = 16.sp)
+            BigButton("Save backup", { vm.saveBackup() }, Modifier.fillMaxWidth(), primary = false)
+            BigButton("Share backup", { vm.shareBackup() }, Modifier.fillMaxWidth(), primary = false)
+            BigButton("Restore backup", { vm.pickRestore() }, Modifier.fillMaxWidth(), primary = false)
             BigButton("Done", { vm.closeSettings() }, Modifier.fillMaxWidth())
-        }
-    }
-}
-
-@Composable
-private fun SessionsDialog(vm: TrackerViewModel, sessions: List<SessionSummary>) {
-    Dialog(onDismissRequest = { vm.closeSessions() }) {
-        Column(
-            Modifier.fillMaxWidth().background(Card, RoundedCornerShape(20.dp)).padding(16.dp).heightIn(max = 520.dp)
-        ) {
-            Text("Past sessions", color = Ink, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            LazyColumn(Modifier.heightIn(max = 340.dp)) {
-                items(sessions, key = { it.id }) { session ->
-                    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                        Text(session.name, color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "${session.rolls} rolls · ${session.ratio}" + if (session.current) " · open" else "",
-                            color = Muted, fontSize = 14.sp
-                        )
-                        Row {
-                            TextButton(onClick = { vm.openSession(session.id) }) { Text("Open") }
-                            TextButton(onClick = { vm.deleteSession(session.id) }) { Text("Delete", color = Seven) }
-                        }
-                    }
-                }
-            }
-            BigButton("Close", { vm.closeSessions() }, Modifier.fillMaxWidth(), primary = false)
         }
     }
 }
@@ -821,7 +871,7 @@ private fun FramingOverlay(
 }
 
 @Composable
-private fun DiePicker(label: String, selected: Int?, onPick: (Int) -> Unit) {
+internal fun DiePicker(label: String, selected: Int?, onPick: (Int) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, color = Muted, fontSize = 15.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
@@ -845,7 +895,7 @@ private fun DiePicker(label: String, selected: Int?, onPick: (Int) -> Unit) {
 }
 
 @Composable
-private fun BigButton(
+internal fun BigButton(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -884,6 +934,17 @@ private fun shareImage(context: android.content.Context, file: File) {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     context.startActivity(Intent.createChooser(send, "Share the still"))
+}
+
+private fun shareJson(context: android.content.Context, file: File) {
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "application/json"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, file.name)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, "Share backup"))
 }
 
 private fun shareCsv(context: android.content.Context, file: File) {

@@ -12,10 +12,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.srrtracker.camera.StillCapture
 import com.srrtracker.camera.rgbToJpeg
+import com.srrtracker.BuildConfig
 import com.srrtracker.data.AppDatabase
+import com.srrtracker.data.BackupCodec
+import com.srrtracker.data.HistoryMigration
 import com.srrtracker.data.PhotoStore
 import com.srrtracker.data.RollEntity
 import com.srrtracker.data.Session
+import com.srrtracker.data.Tag
 import com.srrtracker.detect.CameraBox
 import com.srrtracker.detect.CaptureDecision
 import com.srrtracker.detect.ColoredDiceReader
@@ -28,6 +32,7 @@ import com.srrtracker.detect.NormRect
 import com.srrtracker.detect.RgbImage
 import com.srrtracker.detect.encodePips
 import com.srrtracker.feedback.RollFeedback
+import com.srrtracker.stats.PracticeStats
 import com.srrtracker.stats.SrrStats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -60,7 +65,9 @@ data class RollRow(
     val ratio: String,
     val isSeven: Boolean,
     val unread: Boolean = false,
-    val reason: String? = null
+    val reason: String? = null,
+    val label: String = "",
+    val quick: Boolean = false
 )
 
 data class PendingCheck(
@@ -72,12 +79,28 @@ data class PendingCheck(
     val rollId: Long = 0
 )
 
-data class SessionSummary(
+data class SessionCard(
     val id: Long,
     val name: String,
-    val rolls: Int,
+    val throws: Int,
     val ratio: String,
-    val current: Boolean
+    val current: Boolean,
+    val tagId: Long?,
+    val tagName: String?,
+    val die1: Int?,
+    val die2: Int?,
+    val whenLabel: String,
+    val durationLabel: String
+)
+
+data class GoalRow(
+    val tagId: Long,
+    val name: String,
+    val die1: Int,
+    val die2: Int,
+    val throws: Int,
+    val goal: Int,
+    val ratio: String
 )
 
 data class LiveResult(
@@ -105,7 +128,19 @@ data class UiState(
     val showSessions: Boolean = false,
     val confirmNew: Boolean = false,
     val confirmDelete: Boolean = false,
-    val sessions: List<SessionSummary> = emptyList(),
+    val sessions: List<SessionCard> = emptyList(),
+    val tags: List<Tag> = emptyList(),
+    val tagId: Long? = null,
+    val showManual: Boolean = false,
+    val showTagManager: Boolean = false,
+    val tagFilter: Long? = null,
+    val manualLeft: Int? = null,
+    val manualRight: Int? = null,
+    val tagPickerFor: Long? = null,
+    val goalRows: List<GoalRow> = emptyList(),
+    val newSessionTagId: Long? = null,
+    val restoreSummary: String? = null,
+    val deleteTagId: Long? = null,
     val sensitivity: Int = 50,
     val settleMs: Long = 500L,
     val soundOn: Boolean = true,
@@ -128,6 +163,9 @@ data class UiState(
 sealed interface UiEffect {
     data class ShareFile(val path: String) : UiEffect
     data class ShareImage(val path: String) : UiEffect
+    data class SaveBackup(val json: String, val name: String) : UiEffect
+    data class ShareBackup(val path: String) : UiEffect
+    data object PickRestore : UiEffect
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -148,6 +186,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     private var currentRolls: List<RollEntity> = emptyList()
     private var lastInfo: MotionGate.FrameInfo? = null
     private var flashJob: Job? = null
+    private var pendingRestore: String? = null
 
     init {
         val guide = prefs.getBoolean(KEY_GUIDE, false)
@@ -176,9 +215,11 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val saved = prefs.getLong(KEY_SESSION, -1L)
             val existing = if (saved > 0) db.sessions().get(saved) else null
-            val session = existing ?: insertSession()
+            val session = existing ?: insertSession(null)
             sessionId.value = session.id
-            _ui.update { it.copy(ready = true, sessionName = session.name) }
+            ensureDefaultTag()
+            val tags = db.tags().all()
+            _ui.update { it.copy(ready = true, sessionName = session.name, tagId = session.tagId, tags = tags) }
         }
         viewModelScope.launch {
             sessionId.flatMapLatest { id ->
@@ -359,9 +400,13 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                             total = d1 + d2,
                             corrected = changed,
                             unread = false,
-                            readReason = null
+                            readReason = null,
+                            leftFace = d1,
+                            rightFace = d2,
+                            isSeven = d1 + d2 == 7
                         )
                     )
+                    db.sessions().setEnded(roll.sessionId, System.currentTimeMillis())
                     showFlash("Logged ${d1 + d2}", d1 + d2 == 7, liveThumb(pending.jpeg, d1 + d2))
                 }
             } else {
@@ -418,21 +463,212 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     fun closeMenu() = _ui.update { it.copy(showMenu = false) }
     fun openSettings() = _ui.update { it.copy(showMenu = false, showSettings = true) }
     fun closeSettings() = _ui.update { it.copy(showSettings = false) }
-    fun askNewSession() = _ui.update { it.copy(showMenu = false, confirmNew = true) }
+    fun askNewSession() = _ui.update {
+        it.copy(showMenu = false, confirmNew = true, newSessionTagId = it.tagId)
+    }
+
+    fun pickNewSessionTag(tagId: Long?) = _ui.update { it.copy(newSessionTagId = tagId) }
     fun cancelNewSession() = _ui.update { it.copy(confirmNew = false) }
 
     fun confirmNewSession() {
         viewModelScope.launch {
-            val session = insertSession()
+            val session = insertSession(_ui.value.newSessionTagId)
             sessionId.value = session.id
-            _ui.update { it.copy(confirmNew = false, sessionName = session.name, showMenu = false) }
+            _ui.update {
+                it.copy(confirmNew = false, sessionName = session.name, showMenu = false, tagId = session.tagId)
+            }
             showFlash("New session started", false)
         }
     }
 
     fun openSessions() {
         viewModelScope.launch {
-            _ui.update { it.copy(showMenu = false, showSessions = true, sessions = loadSessions()) }
+            reloadGoals()
+            _ui.update { it.copy(showMenu = false, showSessions = true, showManual = false, sessions = loadSessions()) }
+        }
+    }
+
+    fun setTagFilter(tagId: Long?) = _ui.update { it.copy(tagFilter = tagId) }
+
+    fun openManual() = _ui.update {
+        it.copy(showMenu = false, showManual = true, showSessions = false, manualLeft = null, manualRight = null)
+    }
+
+    fun closeManual() = _ui.update { it.copy(showManual = false, manualLeft = null, manualRight = null) }
+
+    fun pickManual(die: Int, value: Int) {
+        _ui.update {
+            if (die == 0) it.copy(manualLeft = value) else it.copy(manualRight = value)
+        }
+    }
+
+    fun saveManualEntry() {
+        val left = _ui.value.manualLeft ?: return
+        val right = _ui.value.manualRight ?: return
+        if (left !in 1..6 || right !in 1..6) return
+        viewModelScope.launch {
+            logPractice(PracticeStats.SOURCE_MANUAL, left, right, left + right == 7)
+            _ui.update { it.copy(manualLeft = null, manualRight = null) }
+        }
+    }
+
+    fun quickEntry(seven: Boolean) {
+        viewModelScope.launch {
+            logPractice(PracticeStats.SOURCE_QUICK, null, null, seven)
+        }
+    }
+
+    fun openTagPicker(sessionId: Long) = _ui.update { it.copy(tagPickerFor = sessionId) }
+    fun openLiveTag() {
+        val id = sessionId.value
+        if (id > 0) openTagPicker(id)
+    }
+    fun closeTagPicker() = _ui.update { it.copy(tagPickerFor = null) }
+
+    fun setSessionTag(sid: Long, tagId: Long?) {
+        viewModelScope.launch {
+            db.sessions().setTag(sid, tagId)
+            if (sid == sessionId.value) {
+                _ui.update { it.copy(tagId = tagId, tagPickerFor = null) }
+            } else {
+                _ui.update { it.copy(tagPickerFor = null) }
+            }
+            if (_ui.value.showSessions) {
+                reloadGoals()
+                _ui.update { it.copy(sessions = loadSessions()) }
+            }
+        }
+    }
+
+    fun openTagManager() {
+        viewModelScope.launch {
+            reloadGoals()
+            _ui.update { it.copy(showTagManager = true, showMenu = false) }
+        }
+    }
+
+    fun closeTagManager() = _ui.update { it.copy(showTagManager = false, deleteTagId = null) }
+
+    fun saveTag(id: Long?, name: String, die1: Int, die2: Int, goal: Int?) {
+        val clean = name.trim().take(24)
+        if (clean.isEmpty()) return
+        val storedGoal = goal?.takeIf { it >= 1 }
+        viewModelScope.launch {
+            if (id == null) {
+                val sort = (db.tags().all().maxOfOrNull { it.sortOrder } ?: -1) + 1
+                db.tags().insert(Tag(name = clean, die1Color = die1, die2Color = die2, goal = storedGoal, sortOrder = sort))
+            } else {
+                val existing = db.tags().all().find { it.id == id } ?: return@launch
+                db.tags().update(existing.copy(name = clean, die1Color = die1, die2Color = die2, goal = storedGoal))
+            }
+            reloadGoals()
+            if (_ui.value.showSessions) _ui.update { it.copy(sessions = loadSessions()) }
+        }
+    }
+
+    fun askDeleteTag(id: Long) = _ui.update { it.copy(deleteTagId = id) }
+    fun cancelDeleteTag() = _ui.update { it.copy(deleteTagId = null) }
+
+    fun confirmDeleteTag() {
+        val id = _ui.value.deleteTagId ?: return
+        viewModelScope.launch {
+            val tag = db.tags().all().find { it.id == id } ?: return@launch
+            db.sessions().clearTag(id)
+            db.tags().delete(tag)
+            val still = if (_ui.value.tagId == id) null else _ui.value.tagId
+            reloadGoals()
+            _ui.update {
+                it.copy(
+                    deleteTagId = null,
+                    tagId = still,
+                    tagFilter = if (it.tagFilter == id) null else it.tagFilter,
+                    sessions = if (it.showSessions) loadSessions() else it.sessions
+                )
+            }
+        }
+    }
+
+    fun saveBackup() {
+        viewModelScope.launch {
+            val file = buildBackup()
+            val name = "srr-backup-" + DateTimeFormatter.ofPattern("yyyy-MM-dd-HHmm", Locale.US)
+                .withZone(ZoneId.systemDefault())
+                .format(Instant.now()) + ".json"
+            _effects.emit(UiEffect.SaveBackup(BackupCodec.export(file), name))
+        }
+    }
+
+    fun shareBackup() {
+        viewModelScope.launch {
+            val json = BackupCodec.export(buildBackup())
+            val name = "srr-backup.json"
+            val file = withContext(Dispatchers.IO) {
+                val dir = File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                File(dir, name).apply { writeText(json) }
+            }
+            _effects.emit(UiEffect.ShareBackup(file.absolutePath))
+        }
+    }
+
+    fun pickRestore() {
+        _effects.tryEmit(UiEffect.PickRestore)
+    }
+
+    fun previewRestore(text: String) {
+        val parsed = try {
+            BackupCodec.parse(text)
+        } catch (e: BackupCodec.Invalid) {
+            val message = e.message ?: "That file is not an SRR backup."
+            note(message)
+            showFlash(message, false)
+            return
+        }
+        pendingRestore = text
+        val summary = "${parsed.sessions.size} sessions, ${parsed.rolls.size} rolls, ${parsed.tags.size} tags"
+        _ui.update { it.copy(restoreSummary = summary) }
+    }
+
+    fun cancelRestore() {
+        pendingRestore = null
+        _ui.update { it.copy(restoreSummary = null) }
+    }
+
+    fun confirmRestore() {
+        val text = pendingRestore ?: return
+        viewModelScope.launch {
+            val parsed = try {
+                BackupCodec.parse(text)
+            } catch (e: BackupCodec.Invalid) {
+                val message = e.message ?: "That file is not an SRR backup."
+                note(message)
+                showFlash(message, false)
+                return@launch
+            }
+            val safety = BackupCodec.export(buildBackup())
+            withContext(Dispatchers.IO) {
+                val dir = File(getApplication<Application>().filesDir, "backups").apply { mkdirs() }
+                File(dir, "safety-${System.currentTimeMillis()}.json").writeText(safety)
+            }
+            db.replaceAll(parsed)
+            applySettings(parsed.settings)
+            val current = parsed.currentSessionId?.let { db.sessions().get(it) }
+                ?: db.sessions().all().firstOrNull()
+                ?: insertSession(null)
+            prefs.edit().putLong(KEY_SESSION, current.id).apply()
+            sessionId.value = current.id
+            pendingRestore = null
+            reloadGoals()
+            _ui.update {
+                it.copy(
+                    restoreSummary = null,
+                    sessionName = current.name,
+                    tagId = current.tagId,
+                    showSessions = false,
+                    sessions = loadSessions()
+                )
+            }
+            note("Backup restored")
+            showFlash("Backup restored", false)
         }
     }
 
@@ -443,7 +679,9 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             val session = db.sessions().get(id) ?: return@launch
             prefs.edit().putLong(KEY_SESSION, id).apply()
             sessionId.value = id
-            _ui.update { it.copy(showSessions = false, sessionName = session.name) }
+            _ui.update {
+                it.copy(showSessions = false, sessionName = session.name, tagId = session.tagId, showManual = false)
+            }
         }
     }
 
@@ -454,9 +692,9 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             val session = db.sessions().get(id) ?: return@launch
             db.sessions().delete(session)
             if (sessionId.value == id) {
-                val next = db.sessions().all().firstOrNull() ?: insertSession()
+                val next = db.sessions().all().firstOrNull() ?: insertSession(null)
                 sessionId.value = next.id
-                _ui.update { it.copy(sessionName = next.name) }
+                _ui.update { it.copy(sessionName = next.name, tagId = next.tagId) }
             }
             _ui.update { it.copy(sessions = loadSessions()) }
         }
@@ -484,8 +722,9 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         val id = _ui.value.detailId ?: return
         viewModelScope.launch {
             val roll = db.rolls().get(id) ?: return@launch
-            val d1 = if (die == 0) value else roll.d1
-            val d2 = if (die == 1) value else roll.d2
+            if (roll.source == PracticeStats.SOURCE_QUICK) return@launch
+            val d1 = if (die == 0) value else (roll.leftFace ?: roll.d1)
+            val d2 = if (die == 1) value else (roll.rightFace ?: roll.d2)
             val entered = d1 in 1..6 && d2 in 1..6
             val total = if (entered) d1 + d2 else 0
             val detectedTotal = if (roll.detectedD1 != null && roll.detectedD2 != null) {
@@ -494,12 +733,15 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             val corrected = roll.corrected || detectedTotal == null || detectedTotal != total
             db.rolls().update(
                 roll.copy(
-                    d1 = d1,
-                    d2 = d2,
+                    d1 = if (entered) d1 else 0,
+                    d2 = if (entered) d2 else 0,
                     total = total,
                     corrected = corrected,
                     unread = !entered,
-                    readReason = if (entered) null else roll.readReason
+                    readReason = if (entered) null else roll.readReason,
+                    leftFace = d1.takeIf { it in 1..6 },
+                    rightFace = d2.takeIf { it in 1..6 },
+                    isSeven = entered && d1 + d2 == 7
                 )
             )
         }
@@ -639,12 +881,16 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 val rolls = db.rolls().list(session.id)
                 SrrStats.CsvSession(
                     name = session.name,
-                    rolls = rolls.filter { CaptureDecision.countsAsRoll(it.d1, it.d2, it.unread) }.map { r ->
+                    rolls = rolls.filter { PracticeStats.counts(practiceEntry(it)) }.map { r ->
                         SrrStats.CsvRoll(
                             ts = r.ts,
-                            d1 = r.d1,
-                            d2 = r.d2,
-                            total = r.total,
+                            d1 = r.leftFace,
+                            d2 = r.rightFace,
+                            total = if (r.source == PracticeStats.SOURCE_QUICK) {
+                                if (r.isSeven) 7 else 0
+                            } else {
+                                r.total
+                            },
                             corrected = r.corrected,
                             detectedD1 = r.detectedD1,
                             detectedD2 = r.detectedD2,
@@ -763,13 +1009,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             } else null
             Triple(path, debug, crops)
         }
-        val total = if (unread) 0 else d1 + d2
+        val faces = !unread && d1 in 1..6 && d2 in 1..6
+        val total = if (faces) d1 + d2 else 0
         val id = db.rolls().insert(
             RollEntity(
                 sessionId = sid,
                 ts = ts,
-                d1 = d1,
-                d2 = d2,
+                d1 = if (faces) d1 else 0,
+                d2 = if (faces) d2 else 0,
                 total = total,
                 photoPath = saved.first,
                 corrected = userChanged,
@@ -780,9 +1027,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 unread = unread,
                 readReason = reason,
                 debugPath = saved.second,
-                cropPaths = saved.third
+                cropPaths = saved.third,
+                leftFace = if (faces) d1 else null,
+                rightFace = if (faces) d2 else null,
+                isSeven = faces && d1 + d2 == 7,
+                source = PracticeStats.SOURCE_CAMERA
             )
         )
+        db.sessions().setEnded(sid, ts)
         if (!unread) {
             val px = medianDiePx(det)
             val size = if (px != null) " · ${px}px" else ""
@@ -863,22 +1115,30 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun applyRolls(list: List<RollEntity>) {
         currentRolls = list
-        val counted = list.filter { CaptureDecision.countsAsRoll(it.d1, it.d2, it.unread) }
-        val totals = counted.map { it.total }
-        val running = SrrStats.running(totals)
+        val entries = list.map { practiceEntry(it) }
+        val running = PracticeStats.running(entries)
+        val counted = list.filter { PracticeStats.counts(practiceEntry(it)) }
         val ratioById = counted.mapIndexed { i, roll -> roll.id to running[i].ratio }.toMap()
-        val sum = SrrStats.summary(totals)
+        val sum = PracticeStats.summary(entries)
         val rows = list.indices.reversed().map { i ->
             val roll = list[i]
-            val live = CaptureDecision.countsAsRoll(roll.d1, roll.d2, roll.unread)
+            val live = PracticeStats.counts(practiceEntry(roll))
+            val quick = roll.source == PracticeStats.SOURCE_QUICK
             RollRow(
                 id = roll.id,
                 number = i + 1,
                 total = roll.total,
                 ratio = if (!live) "—" else ratioById[roll.id] ?: "—",
-                isSeven = live && roll.total == 7,
+                isSeven = live && roll.isSeven,
                 unread = !live,
-                reason = roll.readReason
+                reason = roll.readReason,
+                label = when {
+                    !live -> "unread"
+                    quick && roll.isSeven -> "7"
+                    quick -> "No 7"
+                    else -> roll.total.toString()
+                },
+                quick = quick
             )
         }
         _ui.update {
@@ -892,24 +1152,201 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun insertSession(): Session {
+    private suspend fun insertSession(tagId: Long?): Session {
         val now = System.currentTimeMillis()
         val name = DateTimeFormatter.ofPattern("MMM d, h:mm a", Locale.getDefault())
             .format(Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()))
             .let { "Session $it" }
-        val id = db.sessions().insert(Session(name = name, startedAt = now))
+        val id = db.sessions().insert(Session(name = name, startedAt = now, endedAt = now, tagId = tagId))
         prefs.edit().putLong(KEY_SESSION, id).apply()
-        return Session(id = id, name = name, startedAt = now)
+        return Session(id = id, name = name, startedAt = now, endedAt = now, tagId = tagId)
     }
 
-    private suspend fun loadSessions(): List<SessionSummary> {
+    private suspend fun loadSessions(): List<SessionCard> {
         val current = sessionId.value
+        val tags = db.tags().all().associateBy { it.id }
+        val whenFmt = DateTimeFormatter.ofPattern("MMM d, h:mm a", Locale.getDefault())
         return db.sessions().all().map { session ->
             val rolls = db.rolls().list(session.id)
-            val sum = SrrStats.summary(rolls.map { it.total })
-            SessionSummary(session.id, session.name, sum.rolls, sum.ratio, session.id == current)
+            val sum = PracticeStats.summary(rolls.map { practiceEntry(it) })
+            val tag = session.tagId?.let { tags[it] }
+            val whenLabel = whenFmt.format(Instant.ofEpochMilli(session.startedAt).atZone(ZoneId.systemDefault()))
+            SessionCard(
+                id = session.id,
+                name = session.name,
+                throws = sum.rolls,
+                ratio = sum.ratio,
+                current = session.id == current,
+                tagId = session.tagId,
+                tagName = tag?.name,
+                die1 = tag?.die1Color,
+                die2 = tag?.die2Color,
+                whenLabel = whenLabel,
+                durationLabel = PracticeStats.formatDuration(session.startedAt, session.endedAt)
+            )
         }
     }
+
+    private suspend fun reloadGoals() {
+        val tags = db.tags().all()
+        val sessions = db.sessions().all()
+        val rolls = sessions.flatMap { session ->
+            db.rolls().list(session.id).map { session.id to practiceEntry(it) }
+        }
+        val tagOf = sessions.associate { it.id to it.tagId }
+        val goals = tags.mapNotNull { tag ->
+            val goal = tag.goal ?: return@mapNotNull null
+            if (goal < 1) return@mapNotNull null
+            val total = PracticeStats.tagTotal(tag.id, goal, tagOf, rolls)
+            GoalRow(tag.id, tag.name, tag.die1Color, tag.die2Color, total.throws, goal, total.ratio)
+        }
+        _ui.update { it.copy(tags = tags, goalRows = goals) }
+    }
+
+    private suspend fun ensureDefaultTag() {
+        if (db.tags().count() > 0) return
+        db.tags().insert(
+            Tag(
+                name = HistoryMigration.HARD_WAY,
+                die1Color = HistoryMigration.HARD_WAY_RED,
+                die2Color = HistoryMigration.HARD_WAY_RED
+            )
+        )
+    }
+
+    private suspend fun logPractice(source: String, left: Int?, right: Int?, seven: Boolean) {
+        val sid = sessionId.value
+        if (sid <= 0) return
+        val ts = System.currentTimeMillis()
+        val quick = source == PracticeStats.SOURCE_QUICK
+        val faces = !quick && left != null && right != null
+        db.rolls().insert(
+            RollEntity(
+                sessionId = sid,
+                ts = ts,
+                d1 = if (faces) left!! else 0,
+                d2 = if (faces) right!! else 0,
+                total = if (quick) {
+                    if (seven) 7 else 0
+                } else {
+                    (left ?: 0) + (right ?: 0)
+                },
+                photoPath = null,
+                corrected = false,
+                detectedD1 = null,
+                detectedD2 = null,
+                confidence = null,
+                pipsJson = null,
+                unread = false,
+                readReason = null,
+                leftFace = if (faces) left else null,
+                rightFace = if (faces) right else null,
+                isSeven = seven,
+                source = source
+            )
+        )
+        db.sessions().setEnded(sid, ts)
+        feedback.onClearRead(seven, _ui.value.soundOn)
+        val text = when {
+            quick && seven -> "Logged 7"
+            quick -> "Logged a roll"
+            else -> "Logged ${(left ?: 0) + (right ?: 0)}"
+        }
+        showFlash(text, seven)
+    }
+
+    private suspend fun buildBackup(): BackupCodec.File {
+        val tags = db.tags().all()
+        val sessions = db.sessions().all()
+        val rolls = sessions.flatMap { db.rolls().list(it.id) }
+        return BackupCodec.File(
+            schema = BackupCodec.SCHEMA,
+            appVersion = BuildConfig.VERSION_NAME,
+            exportedAt = System.currentTimeMillis(),
+            currentSessionId = sessionId.value.takeIf { it > 0 },
+            settings = BackupCodec.Settings(
+                guideDone = prefs.getBoolean(KEY_GUIDE, false),
+                sensitivity = _ui.value.sensitivity,
+                settleMs = _ui.value.settleMs,
+                sounds = _ui.value.soundOn,
+                markPhotos = _ui.value.markPhotos,
+                saveDieCrops = _ui.value.saveDieCrops,
+                saveAllCaptures = _ui.value.saveAllCaptures,
+                zoom = _ui.value.zoom.toDouble(),
+                frameL = _ui.value.frame.left.toDouble(),
+                frameT = _ui.value.frame.top.toDouble(),
+                frameR = _ui.value.frame.right.toDouble(),
+                frameB = _ui.value.frame.bottom.toDouble()
+            ),
+            tags = tags.map {
+                BackupCodec.TagRec(it.id, it.name, it.die1Color, it.die2Color, it.goal, it.sortOrder)
+            },
+            sessions = sessions.map {
+                BackupCodec.SessionRec(it.id, it.name, it.startedAt, it.endedAt, it.tagId)
+            },
+            rolls = rolls.map {
+                BackupCodec.RollRec(
+                    id = it.id,
+                    sessionId = it.sessionId,
+                    ts = it.ts,
+                    leftFace = it.leftFace,
+                    rightFace = it.rightFace,
+                    isSeven = it.isSeven,
+                    source = it.source,
+                    total = it.total,
+                    corrected = it.corrected,
+                    detectedD1 = it.detectedD1,
+                    detectedD2 = it.detectedD2,
+                    confidence = it.confidence,
+                    unread = it.unread,
+                    readReason = it.readReason
+                )
+            }
+        )
+    }
+
+    private fun applySettings(s: BackupCodec.Settings) {
+        prefs.edit()
+            .putBoolean(KEY_GUIDE, s.guideDone)
+            .putInt(KEY_SENS, s.sensitivity)
+            .putLong(KEY_SETTLE, s.settleMs)
+            .putBoolean(KEY_SOUNDS, s.sounds)
+            .putBoolean(KEY_MARK, s.markPhotos)
+            .putBoolean(KEY_CROPS, s.saveDieCrops)
+            .putBoolean(KEY_SAVE_ALL, s.saveAllCaptures)
+            .putFloat(KEY_ZOOM, s.zoom.toFloat())
+            .putFloat(KEY_FRAME_L, s.frameL.toFloat())
+            .putFloat(KEY_FRAME_T, s.frameT.toFloat())
+            .putFloat(KEY_FRAME_R, s.frameR.toFloat())
+            .putFloat(KEY_FRAME_B, s.frameB.toFloat())
+            .apply()
+        _ui.update {
+            it.copy(
+                guideDone = s.guideDone,
+                sensitivity = s.sensitivity,
+                settleMs = s.settleMs,
+                soundOn = s.sounds,
+                markPhotos = s.markPhotos,
+                saveDieCrops = s.saveDieCrops,
+                saveAllCaptures = s.saveAllCaptures,
+                zoom = s.zoom.toFloat(),
+                frame = NormRect(
+                    s.frameL.toFloat(),
+                    s.frameT.toFloat(),
+                    s.frameR.toFloat(),
+                    s.frameB.toFloat()
+                )
+            )
+        }
+    }
+
+    private fun practiceEntry(roll: RollEntity) = PracticeStats.Entry(
+        source = roll.source,
+        unread = roll.unread,
+        leftFace = roll.leftFace,
+        rightFace = roll.rightFace,
+        isSeven = roll.isSeven
+    )
 
     private fun shareJpeg(jpeg: ByteArray, name: String) {
         viewModelScope.launch {
@@ -921,7 +1358,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun note(text: String) {
+    fun note(text: String) {
         _ui.update { it.copy(notice = text) }
         viewModelScope.launch {
             delay(2500)
