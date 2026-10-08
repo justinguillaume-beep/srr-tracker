@@ -25,7 +25,9 @@ class MotionGate(
         val diceInBox: Boolean,
         val roi: NormRect?,
         val stage: Stage,
-        val detail: String
+        val detail: String,
+        /** Colored dice inside the box. 0 when the preview locator has not run. */
+        val diceSeen: Int = 0
     )
 
     private val prev = IntArray(W * H)
@@ -85,6 +87,7 @@ class MotionGate(
     fun onFrame(gray: IntArray, nowMs: Long, coloredDice: Int? = null): FrameInfo {
         require(gray.size == W * H)
         val present = if (coloredDice != null) coloredDice == 2 else diceInBox(gray)
+        val seen = coloredDice ?: 0
         val moving = if (!hasPrev) false else hotCount(prev, gray) >= minHot
         var capture = false
         var roi: NormRect? = null
@@ -96,7 +99,7 @@ class MotionGate(
             copy(gray, lastStill)
             hasPrev = true
             hasStill = true
-            return info(Phase.PAUSED, false, present, null, Stage.PAUSED, "paused")
+            return info(Phase.PAUSED, false, present, null, Stage.PAUSED, "paused", seen)
         }
         if (phase == Phase.PAUSED) phase = Phase.ARMED
 
@@ -230,7 +233,7 @@ class MotionGate(
                 Stage.WAITING -> "waiting for dice"
             }
         }
-        return info(phase, capture, present, roi, stage, detail)
+        return info(phase, capture, present, roi, stage, detail, seen)
     }
 
     /**
@@ -375,8 +378,9 @@ class MotionGate(
         present: Boolean,
         roi: NormRect?,
         stage: Stage,
-        detail: String
-    ) = FrameInfo(phase, capture, present, roi, stage, detail)
+        detail: String,
+        seen: Int
+    ) = FrameInfo(phase, capture, present, roi, stage, detail, seen)
 
     private fun hotCount(a: IntArray, b: IntArray): Int {
         val x0 = (0.08f * W).toInt()

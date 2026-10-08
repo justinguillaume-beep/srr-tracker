@@ -39,21 +39,18 @@ object ColoredDiceReader {
             ImageOps.crop(image, bounds.x, bounds.y, bounds.w, bounds.h)
         }
         val longSide = max(work.width, work.height)
-        if (longSide < 720) {
-            val factor = when {
-                longSide < 280 -> 3
-                longSide < 520 -> 2
-                else -> 1
-            }
-            if (factor != 1) {
-                work = ImageOps.scale(
-                    work,
-                    (work.width * factor).coerceAtLeast(1),
-                    (work.height * factor).coerceAtLeast(1)
-                )
-            }
+        // A very small crop is enlarged so a ~12px die is not a one-pixel speck.
+        // A wide analysis frame is left at its own size: the small-die gate
+        // accepts a die of about 15px, which is what the wide view shows.
+        if (longSide < 420) {
+            val factor = if (longSide < 220) 3 else 2
+            work = ImageOps.scale(
+                work,
+                (work.width * factor).coerceAtLeast(1),
+                (work.height * factor).coerceAtLeast(1)
+            )
         }
-        return locate(work).size
+        return locate(work, smallDice = true).size
     }
 
     fun read(image: RgbImage, roi: NormRect? = null): DiceDetector.Detection {
@@ -65,7 +62,7 @@ object ColoredDiceReader {
         } else {
             ImageOps.crop(image, bounds.x, bounds.y, bounds.w, bounds.h)
         }
-        val located = locate(work).map { box ->
+        val located = locate(work, smallDice = false).map { box ->
             box.copy(x = box.x + bounds.x, y = box.y + bounds.y)
         }.sortedWith(compareBy({ it.y }, { it.x }))
         val reads = located.map { countWhitePips(image, it) }
@@ -167,7 +164,7 @@ object ColoredDiceReader {
         val sizeLog: String
     )
 
-    private fun locate(image: RgbImage): List<Box> {
+    private fun locate(image: RgbImage, smallDice: Boolean): List<Box> {
         val longSide = max(image.width, image.height)
         val scale = if (longSide > 1600) longSide / 1600f else 1f
         val sw = max(1, (image.width / scale).roundToInt())
@@ -190,17 +187,21 @@ object ColoredDiceReader {
             val chroma = mx - min(r, min(g, b))
             val pur = min(r, b) - g
             val yel = min(r, g) - b
-            if (pur > 14 && mx in 50..239 && chroma > 12) purple[i] = true
+            val purCut = if (smallDice) 8 else 14
+            if (pur > purCut && mx in 50..239 && chroma > if (smallDice) 8 else 12) purple[i] = true
             else if (yel > 48 && mx > 90 && b < 165 && chroma > 40 && g > 80) {
                 // The cut stays at 48 so ivory (about 46) is not a die. Tan cloth
                 // can still cross 48, so a real gold die also has to have a brighter core.
                 yellow[i] = true
                 if (yel > 60) yellowCore[i] = true
-            } else if (redDie(r, g, b, chroma)) {
+            } else if (redDie(r, g, b, chroma) || (smallDice && softRed(r, g, b))) {
                 red[i] = true
                 // Tan patches can cross the red cut after the JPEG is decoded.
-                // A real red die still has a much stronger core.
-                if (r - max(g, b) > 64) redCore[i] = true
+                // A real red die still has a much stronger core. In the wide
+                // view a translucent die is mixed with the cloth, so the core
+                // is allowed to be a little weaker there.
+                val coreCut = if (smallDice) 28 else 64
+                if (r - max(g, b) > coreCut) redCore[i] = true
             }
         }
         val boxes = ArrayList<Box>()
@@ -209,15 +210,15 @@ object ColoredDiceReader {
         // keep. Radius 3 joins the pieces. That box is added only when half of it
         // was already purple, so a close around a speck is not a die, and only
         // when it is not already one of the tighter boxes.
-        val purpleTight = components(close(purple, sw, sh, 1), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, null)
-        val purpleWide = components(close(purple, sw, sh, 3), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, purple, 5)
+        val purpleTight = components(close(purple, sw, sh, 1), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, null, smallDice = smallDice)
+        val purpleWide = components(close(purple, sw, sh, 3), sw, sh, 'P', scale, xScale, yScale, image.width, image.height, 0.32f, purple, 5, smallDice)
         boxes += purpleTight
         // Gold dice are translucent, so the yellow mask is full of pip holes.
         // A wider close joins those holes without lowering the yellow threshold.
-        boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, xScale, yScale, image.width, image.height, 0.27f, yellowCore)
+        boxes += components(close(yellow, sw, sh, 3), sw, sh, 'Y', scale, xScale, yScale, image.width, image.height, 0.27f, yellowCore, smallDice = smallDice)
         // Red/pink dice are translucent too. Close radius 2 fills pip holes
         // without pulling in the warm grey cloth (that stays under the margin).
-        boxes += components(close(red, sw, sh, 2), sw, sh, 'R', scale, xScale, yScale, image.width, image.height, 0.28f, redCore)
+        boxes += components(close(red, sw, sh, 2), sw, sh, 'R', scale, xScale, yScale, image.width, image.height, 0.28f, redCore, smallDice = smallDice)
         boxes += purpleWide.filter { wide -> boxes.none { overlapsDie(it, wide) } }
         return dropSizeOutliers(dropContained(mergeSameColor(boxes)))
     }
@@ -227,6 +228,16 @@ object ColoredDiceReader {
      * yellow test (margin 48, so ivory near 46 is not taken). Warm grey cloth
      * is only a few levels redder than green, which this margin rejects.
      */
+    /**
+     * Translucent red mixed with grey cloth in a wide view. Still redder than
+     * the cloth, and not the warm-tan clutter the strict cut is there to drop.
+     */
+    private fun softRed(r: Int, g: Int, b: Int): Boolean {
+        val margin = r - max(g, b)
+        val chroma = max(r, max(g, b)) - min(r, min(g, b))
+        return margin > 22 && chroma > 24 && r > 90 && r - g > 16 && r - b > 16 && g < 190 && b < 180
+    }
+
     private fun redDie(r: Int, g: Int, b: Int, chroma: Int): Boolean {
         val margin = r - max(g, b)
         // Margin 40 keeps warm tan clutter (red ahead of green by ~25) off the
@@ -256,11 +267,20 @@ object ColoredDiceReader {
         fullH: Int,
         minFill: Float,
         core: BooleanArray?,
-        coreTenths: Int = 1
+        coreTenths: Int = 1,
+        smallDice: Boolean = false
     ): List<Box> {
-        val minSide = (32f / scale).toInt().coerceIn(10, 48)
+        // The full-resolution still is masked at 1600px, so 32px there is a
+        // normal die. The wide preview is not scaled down that way, and a die
+        // in that view is about 15px. The shutter uses the smaller gate.
+        val minSide = if (smallDice) {
+            (10f / scale).toInt().coerceIn(6, 24)
+        } else {
+            (32f / scale).toInt().coerceIn(10, 48)
+        }
         val maxSide = (200f / scale).toInt().coerceIn(minSide + 8, 480)
-        val minArea = (minSide * minSide * 0.35f).toInt().coerceAtLeast(40)
+        val minArea = (minSide * minSide * 0.28f).toInt().coerceAtLeast(if (smallDice) 8 else 40)
+        val minCore = if (smallDice) 3 else 8
         val maxArea = maxSide * maxSide
         val seen = BooleanArray(mask.size)
         val out = ArrayList<Box>()
@@ -296,7 +316,7 @@ object ColoredDiceReader {
             // Split that blob at its narrow waist. A blob we already accept is left whole.
             if ((bw > maxSide && bh in minSide..maxSide) || (bh > maxSide && bw in minSide..maxSide)) {
                 for (span in splitTouching(pix, area, w, bw > maxSide, minSide, maxSide)) {
-                    consider(out, span, kind, xScale, yScale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill, w, core, coreTenths)
+                    consider(out, span, kind, xScale, yScale, fullW, fullH, minSide, maxSide, minArea, maxArea, minFill, w, core, coreTenths, minCore)
                 }
                 continue
             }
@@ -305,7 +325,7 @@ object ColoredDiceReader {
             val aspect = bw.toFloat() / bh
             val fill = area.toFloat() / (bw * bh)
             if (aspect !in 0.55f..1.80f || fill < minFill) continue
-            if (!saturatedCore(core, pix, area, coreTenths)) continue
+            if (!saturatedCore(core, pix, area, coreTenths, minCore)) continue
             out += toBox(minX, minY, maxX, maxY, area, kind, xScale, yScale, fullW, fullH)
         }
         return out
@@ -399,7 +419,8 @@ object ColoredDiceReader {
         minFill: Float,
         imageW: Int,
         core: BooleanArray?,
-        coreTenths: Int
+        coreTenths: Int,
+        minCore: Int
     ) {
         val bw = span.x1 - span.x0 + 1
         val bh = span.y1 - span.y0 + 1
@@ -408,17 +429,17 @@ object ColoredDiceReader {
         val aspect = bw.toFloat() / bh
         val fill = span.area.toFloat() / (bw * bh)
         if (aspect !in 0.55f..1.80f || fill < minFill) return
-        if (core != null && !spanHasCore(core, imageW, span, coreTenths)) return
+        if (core != null && !spanHasCore(core, imageW, span, coreTenths, minCore)) return
         out += toBox(span.x0, span.y0, span.x1, span.y1, span.area, kind, xScale, yScale, fullW, fullH)
     }
 
-    private fun spanHasCore(core: BooleanArray, imageW: Int, span: Span, coreTenths: Int): Boolean {
+    private fun spanHasCore(core: BooleanArray, imageW: Int, span: Span, coreTenths: Int, minCore: Int): Boolean {
         var c = 0
         for (y in span.y0..span.y1) {
             val row = y * imageW
             for (x in span.x0..span.x1) if (core[row + x]) c++
         }
-        return c >= 8 && c * 10 >= span.area * coreTenths
+        return c >= minCore && c * 10 >= span.area * coreTenths
     }
 
     private fun toBox(
@@ -444,11 +465,11 @@ object ColoredDiceReader {
      * Gold and red dice are saturated. Tan clutter can cross the cut and then
      * stop, so a kept die has to contain a brighter core of the same hue.
      */
-    private fun saturatedCore(core: BooleanArray?, pix: IntArray, n: Int, coreTenths: Int): Boolean {
+    private fun saturatedCore(core: BooleanArray?, pix: IntArray, n: Int, coreTenths: Int, minCore: Int): Boolean {
         if (core == null || n <= 0) return true
         var c = 0
         for (k in 0 until n) if (core[pix[k]]) c++
-        return c >= 8 && c * 10 >= n * coreTenths
+        return c >= minCore && c * 10 >= n * coreTenths
     }
 
     /** Two boxes are the same die when they share half of the smaller one. */

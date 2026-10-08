@@ -28,7 +28,8 @@ object SyntheticTable {
         val pip2: String? = null,
         val squash: Double = 1.0,
         val shear: Double = 0.0,
-        val photoNoise: Int = 0
+        val photoNoise: Int = 0,
+        val greyCloth: Boolean = false
     )
 
     data class Scene(
@@ -56,6 +57,7 @@ object SyntheticTable {
                 val gain = 1.0 + if (spec.glare) 0.22 * (x.toDouble() / width - 0.15) else 0.03 * (x.toDouble() / width - 0.5)
                 val n = rng.nextInt(7) - 3
                 val base = when {
+                    spec.greyCloth -> intArrayOf(150 + n / 2, 148 + n / 2, 146 + n / 2)
                     spec.lightTable -> intArrayOf(228 + n / 2, 222 + n / 2, 204 + n / 2)
                     spec.wood -> woodPixel(x, y, n)
                     else -> intArrayOf(24 + n, 92 + n, 58 + n)

@@ -121,6 +121,7 @@ data class UiState(
     val pctLabel: String = "no 7s yet",
     val rows: List<RollRow> = emptyList(),
     val diceInBox: Boolean = false,
+    val diceSeen: Int = 0,
     val pending: PendingCheck? = null,
     val detailId: Long? = null,
     val showMenu: Boolean = false,
@@ -231,17 +232,24 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     fun onFrame(info: MotionGate.FrameInfo) {
         val prev = lastInfo
         lastInfo = info
-        val changed = prev?.diceInBox != info.diceInBox || prev.phase != info.phase || prev.stage != info.stage
+        val changed = prev?.diceInBox != info.diceInBox || prev.diceSeen != info.diceSeen ||
+            prev.phase != info.phase || prev.stage != info.stage
         if (changed) {
-            Log.i(TAG, "gate ${info.stage} phase=${info.phase} dice=${info.diceInBox} capture=${info.shouldCapture} ${info.detail}")
+            Log.i(TAG, "gate ${info.stage} phase=${info.phase} dice=${info.diceSeen} capture=${info.shouldCapture} ${info.detail}")
         }
         if (info.shouldCapture) {
             _ui.update {
-                it.copy(diceInBox = info.diceInBox, status = "Capturing...", statusIsSeven = false, busy = true)
+                it.copy(
+                    diceInBox = info.diceInBox,
+                    diceSeen = info.diceSeen,
+                    status = "Capturing...",
+                    statusIsSeven = false,
+                    busy = true
+                )
             }
         }
         if (!changed && _ui.value.cameraMessage == null) return
-        _ui.update { it.copy(diceInBox = info.diceInBox) }
+        _ui.update { it.copy(diceInBox = info.diceInBox, diceSeen = info.diceSeen) }
         if (counting.get() || _ui.value.pending != null || _ui.value.busy) return
         if (flashJob?.isActive == true) return
         publishLiveStatus()
@@ -940,8 +948,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         val dice = det?.dice?.filter { it.w > 0 && it.h > 0 }.orEmpty()
         if (dice.isEmpty() || diePx == null || diePx <= 0) return ""
         val boxes = dice.joinToString(", ") { "${it.w}×${it.h}" }
-        val small = if (diePx < 60) " Dice look small: zoom in or move the phone closer." else ""
-        return " Die box long side is $diePx px on this still (rectangles $boxes). That is the detector's box on the saved photo, not the die's size in the preview.$small"
+        return " Die box long side is $diePx px on this still (rectangles $boxes). That is the detector's box on the saved photo, not the die's size in the preview."
     }
 
     private fun medianDiePx(det: DiceDetector.Detection?): Int? {
@@ -1009,11 +1016,12 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
             } else null
             Triple(path, debug, crops)
         }
-        val faces = !unread && d1 in 1..6 && d2 in 1..6
-        val total = if (faces) d1 + d2 else 0
+        val logged = CaptureDecision.cameraAutoSave(sid, _ui.value.tagId, d1, d2, unread) ?: return -1
+        val faces = logged.leftFace != null && logged.rightFace != null
+        val total = if (faces) logged.leftFace!! + logged.rightFace!! else 0
         val id = db.rolls().insert(
             RollEntity(
-                sessionId = sid,
+                sessionId = logged.sessionId,
                 ts = ts,
                 d1 = if (faces) d1 else 0,
                 d2 = if (faces) d2 else 0,
@@ -1024,14 +1032,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                 detectedD2 = det?.d2,
                 confidence = if (unread) "unread" else det?.confidence,
                 pipsJson = det?.pips?.let { encodePips(it) },
-                unread = unread,
+                unread = logged.unread,
                 readReason = reason,
                 debugPath = saved.second,
                 cropPaths = saved.third,
-                leftFace = if (faces) d1 else null,
-                rightFace = if (faces) d2 else null,
-                isSeven = faces && d1 + d2 == 7,
-                source = PracticeStats.SOURCE_CAMERA
+                leftFace = logged.leftFace,
+                rightFace = logged.rightFace,
+                isSeven = logged.isSeven,
+                source = logged.source
             )
         )
         db.sessions().setEnded(sid, ts)

@@ -1,5 +1,7 @@
 package com.srrtracker.detect
 
+import com.srrtracker.stats.PracticeStats
+
 /**
  * What to do with a still. A frame with no die box is not a roll: the check
  * screen must not open, and nothing is logged. A face is prefilled only when
@@ -30,4 +32,33 @@ object CaptureDecision {
     /** A roll enters the total and the SRR only when both faces were entered. */
     fun countsAsRoll(d1: Int, d2: Int, unread: Boolean): Boolean =
         !unread && d1 in 1..6 && d2 in 1..6
+
+    /**
+     * What an auto-saved camera roll stores. A session with no tag is valid.
+     * The only refusal is a missing session. The tag is recorded so the throw
+     * can be totaled later; it is not required to log the roll.
+     */
+    data class CameraSave(
+        val sessionId: Long,
+        val tagId: Long?,
+        val leftFace: Int?,
+        val rightFace: Int?,
+        val isSeven: Boolean,
+        val unread: Boolean,
+        val source: String
+    )
+
+    fun cameraAutoSave(sessionId: Long, tagId: Long?, d1: Int, d2: Int, unread: Boolean): CameraSave? {
+        if (sessionId <= 0) return null
+        val faces = !unread && d1 in 1..6 && d2 in 1..6
+        return CameraSave(
+            sessionId = sessionId,
+            tagId = tagId,
+            leftFace = if (faces) d1 else null,
+            rightFace = if (faces) d2 else null,
+            isSeven = faces && d1 + d2 == 7,
+            unread = unread || !faces,
+            source = PracticeStats.SOURCE_CAMERA
+        )
+    }
 }

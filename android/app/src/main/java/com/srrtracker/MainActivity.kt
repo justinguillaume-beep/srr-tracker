@@ -300,7 +300,14 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
             color = statusColor(state),
             fontSize = 28.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+        )
+        Text(
+            "dice seen: ${state.diceSeen}",
+            color = if (state.diceSeen == 2) Good else Muted,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(bottom = 6.dp)
         )
         Box(
             Modifier.fillMaxWidth().height(210.dp).background(Color.Black, RoundedCornerShape(16.dp))
@@ -322,14 +329,6 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
                 modifier = Modifier.weight(1f)
             )
             TextButton(onClick = { vm.nudgeZoom(0.15f) }) { Text("+", color = Ink, fontSize = 28.sp) }
-        }
-        if (state.diePx != null && state.diePx < 60) {
-            Text(
-                "Dice look small (${state.diePx} px): zoom in or move the phone closer.",
-                color = Seven,
-                fontSize = 16.sp
-            )
-            BigButton("Auto-zoom", { vm.autoZoom() }, Modifier.fillMaxWidth(), primary = false)
         }
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

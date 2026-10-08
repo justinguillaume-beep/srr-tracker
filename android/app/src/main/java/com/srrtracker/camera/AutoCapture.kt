@@ -153,7 +153,7 @@ class AutoCapture(
             .setResolutionSelector(
                 ResolutionSelector.Builder()
                     .setResolutionStrategy(
-                        ResolutionStrategy(Size(1280, 720), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
+                        ResolutionStrategy(Size(1920, 1080), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)
                     )
                     .build()
             )
@@ -485,7 +485,9 @@ class AutoCapture(
         val y1 = (roi.bottom * upH).toInt().coerceIn(y0 + 1, upH)
         val bw = x1 - x0
         val bh = y1 - y0
-        val step = max(1, max(bw, bh) / 480)
+        // Keep dice that are only ~15px in the wide view. Sampling this box
+        // down to 480px used to skip them, so the shutter saw zero dice.
+        val step = max(1, max(bw, bh) / 1280)
         val ow = max(1, bw / step)
         val oh = max(1, bh / step)
         val pixels = IntArray(ow * oh)
