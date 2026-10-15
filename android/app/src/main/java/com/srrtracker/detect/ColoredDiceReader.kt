@@ -166,7 +166,10 @@ object ColoredDiceReader {
 
     private fun locate(image: RgbImage, smallDice: Boolean): List<Box> {
         val longSide = max(image.width, image.height)
-        val scale = if (longSide > 1600) longSide / 1600f else 1f
+        // The still is masked at 1600px. The live shutter looks at a crop of the
+        // box, and a 15px die disappears if that crop is shrunk the same way.
+        val cap = if (smallDice) 1920 else 1600
+        val scale = if (longSide > cap) longSide / cap.toFloat() else 1f
         val sw = max(1, (image.width / scale).roundToInt())
         val sh = max(1, (image.height / scale).roundToInt())
         val small = if (sw == image.width && sh == image.height) image else ImageOps.scale(image, sw, sh)
@@ -200,7 +203,7 @@ object ColoredDiceReader {
                 // A real red die still has a much stronger core. In the wide
                 // view a translucent die is mixed with the cloth, so the core
                 // is allowed to be a little weaker there.
-                val coreCut = if (smallDice) 28 else 64
+                val coreCut = if (smallDice) 16 else 64
                 if (r - max(g, b) > coreCut) redCore[i] = true
             }
         }
@@ -235,7 +238,11 @@ object ColoredDiceReader {
     private fun softRed(r: Int, g: Int, b: Int): Boolean {
         val margin = r - max(g, b)
         val chroma = max(r, max(g, b)) - min(r, min(g, b))
-        return margin > 22 && chroma > 24 && r > 90 && r - g > 16 && r - b > 16 && g < 190 && b < 180
+        // Red hue wraps through 0°. That is "R is the strongest channel", not a
+        // 0–360° cut that drops hue 350. A translucent die mixed with grey is
+        // only a little redder than the cloth, and a bit of blue in the plastic
+        // must not push it out of the mask.
+        return margin > 16 && chroma > 18 && r > 80 && r - g > 12 && r - b > 8 && g < 200 && b < 190
     }
 
     private fun redDie(r: Int, g: Int, b: Int, chroma: Int): Boolean {
@@ -274,13 +281,13 @@ object ColoredDiceReader {
         // normal die. The wide preview is not scaled down that way, and a die
         // in that view is about 15px. The shutter uses the smaller gate.
         val minSide = if (smallDice) {
-            (10f / scale).toInt().coerceIn(6, 24)
+            (8f / scale).toInt().coerceIn(5, 24)
         } else {
             (32f / scale).toInt().coerceIn(10, 48)
         }
         val maxSide = (200f / scale).toInt().coerceIn(minSide + 8, 480)
         val minArea = (minSide * minSide * 0.28f).toInt().coerceAtLeast(if (smallDice) 8 else 40)
-        val minCore = if (smallDice) 3 else 8
+        val minCore = if (smallDice) 2 else 8
         val maxArea = maxSide * maxSide
         val seen = BooleanArray(mask.size)
         val out = ArrayList<Box>()
@@ -697,12 +704,13 @@ object ColoredDiceReader {
     )
 
     private fun readBlobs(face: RgbImage): BlobFace {
+        val cream = readCreamPips(face)
         val opened = readBlobsAt(face, 1)
-        if (opened.count in 1..6) return opened
+        if (opened.count in 1..6) return preferCream(opened, cream)
         // A fat glare streak can hide one pip of a 4. A wider open shrinks that
         // streak onto the pip. A face that already read stays as it was.
         val wider = readBlobsAt(face, 2)
-        if (wider.count in 1..6) return wider
+        if (wider.count in 1..6) return preferCream(wider, cream)
         // Glare can weld two pips into one blob and hide a six. The centers of
         // the round cores are still there. Only a face that read nothing gets here.
         val peaked = readPeaks(face)
@@ -711,7 +719,55 @@ object ColoredDiceReader {
         // cores (including the center) are still there. Only a face that read
         // nothing gets here.
         val five = readQuincunx(face)
-        return if (five.count == 5) five else opened
+        val base = if (five.count == 5) five else opened
+        return preferCream(base, cream)
+    }
+
+    /**
+     * Cream pips on translucent red never reach the 208 white cut, so a five
+     * counts as zero and a six breaks into one column of three. These blobs are
+     * bright, low-saturation, and round, and they have to match each other in
+     * size. A red serial stamp fails the saturation test. Rim glare and the
+     * bevel fail the roundness or the size test.
+     */
+    private fun readCreamPips(face: RgbImage): BlobFace {
+        var bestScore = -1e9f
+        var best = BlobFace(0, false, 0f, emptyList())
+        for (thr in intArrayOf(150, 168, 186, 200)) {
+            val blobs = whiteBlobs(face, thr, 1)
+            if (blobs.size < 4) continue
+            val big = blobs.maxOf { it.area }.coerceAtLeast(1)
+            val round = blobs.filter {
+                it.area >= 0.55f * big &&
+                    it.aspect in 0.70f..1.45f &&
+                    it.fill >= 0.58f &&
+                    it.nx in 0.08f..0.92f &&
+                    it.ny in 0.08f..0.92f
+            }
+            if (round.size !in 4..6) continue
+            val count = geometry(round)
+            if (count !in 4..6 || count != round.size) continue
+            val ratio = round.maxOf { it.area }.toFloat() / round.minOf { it.area }.coerceAtLeast(1)
+            if (ratio > 1.55f) continue
+            val score = 100f + count * 4f + thr / 20f - ratio * 6f
+            if (score > bestScore) {
+                bestScore = score
+                best = BlobFace(count, true, 1f / ratio, round.map { it.nx to it.ny }, ratio)
+            }
+        }
+        return best
+    }
+
+    /**
+     * Keep a clear bright-white face. Cream replaces a miss, or an unclear
+     * count such as one column of a six. A clear 1 or 2 stays, so a blown-out
+     * six is not promoted into a logged face.
+     */
+    private fun preferCream(current: BlobFace, cream: BlobFace): BlobFace {
+        if (!cream.clear || cream.count !in 4..6) return current
+        if (current.clear && current.count in 1..6) return current
+        if (current.count == 0 || !current.clear) return cream
+        return current
     }
 
     /**

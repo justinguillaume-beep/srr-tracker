@@ -57,18 +57,18 @@ class WideViewDiceTest {
         val seen = ColoredDiceReader.diceCount(preview, wide)
         assertEquals(2, seen)
 
-        val gate = MotionGate(settleMs = 400)
+        val gate = MotionGate(settleMs = 1000)
         gate.running = true
         gate.frame = wide
         val gray = IntArray(MotionGate.W * MotionGate.H) { 140 }
         val first = gate.onFrame(gray, 1_000L, seen)
         assertFalse(first.shouldCapture)
         assertEquals(2, first.diceSeen)
-        val shot = gate.onFrame(gray, 1_500L, seen)
+        val shot = gate.onFrame(gray, 2_000L, seen)
         assertTrue(shot.shouldCapture)
         assertEquals(2, shot.diceSeen)
 
-        val quiet = MotionGate(settleMs = 400)
+        val quiet = MotionGate(settleMs = 1000)
         quiet.running = true
         val none = quiet.onFrame(gray, 2_000L, 0)
         val later = quiet.onFrame(gray, 4_000L, 0)

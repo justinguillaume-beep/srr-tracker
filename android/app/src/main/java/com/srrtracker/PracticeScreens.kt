@@ -251,7 +251,7 @@ internal fun ManualEntryScreen(vm: TrackerViewModel, state: UiState) {
             Text("No rolls in this session yet.", color = Muted, fontSize = 18.sp)
         } else {
             LazyColumn(Modifier.weight(1f)) {
-                items(state.rows, key = { it.id }) { row -> RollLine(row) { vm.openDetail(row.id) } }
+                items(state.rows, key = { it.id }) { row -> RollLine(row) { vm.openRoll(row.id) } }
             }
         }
     }

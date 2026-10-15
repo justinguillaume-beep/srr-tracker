@@ -13,7 +13,8 @@ object CaptureDecision {
 
     /**
      * A pair both read as 1–6 at high confidence is logged with no tap.
-     * Anything else with a die in the frame waits on the check screen.
+     * Anything else with a die in the frame is saved unread. The live camera
+     * stays up. The check screen opens only when that row is tapped later.
      */
     fun autoAccept(det: DiceDetector.Detection?): Boolean {
         if (det == null || !det.ok || det.confidence != "high") return false

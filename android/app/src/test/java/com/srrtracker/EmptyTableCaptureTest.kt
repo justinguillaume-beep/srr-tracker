@@ -92,7 +92,7 @@ class EmptyTableCaptureTest {
     }
 
     @Test
-    fun anUnclearPairStaysOnTheCheckScreen() {
+    fun anUnclearPairIsNotAutoLogged() {
         val det = DiceDetector.Detection(
             ok = false,
             total = null,

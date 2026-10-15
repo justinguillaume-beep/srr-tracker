@@ -11,7 +11,9 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.srrtracker.camera.StillCapture
+import com.srrtracker.camera.decodeUpright
 import com.srrtracker.camera.rgbToJpeg
+import com.srrtracker.camera.toRgbImage
 import com.srrtracker.BuildConfig
 import com.srrtracker.data.AppDatabase
 import com.srrtracker.data.BackupCodec
@@ -143,7 +145,7 @@ data class UiState(
     val restoreSummary: String? = null,
     val deleteTagId: Long? = null,
     val sensitivity: Int = 50,
-    val settleMs: Long = 500L,
+    val settleMs: Long = 1000L,
     val soundOn: Boolean = true,
     val markPhotos: Boolean = true,
     val saveDieCrops: Boolean = true,
@@ -192,7 +194,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
     init {
         val guide = prefs.getBoolean(KEY_GUIDE, false)
         val sensitivity = prefs.getInt(KEY_SENS, 50)
-        val settle = prefs.getLong(KEY_SETTLE, 500L)
+        val settle = prefs.getLong(KEY_SETTLE, 1000L)
         val sound = prefs.getBoolean(KEY_SOUNDS, true)
         val mark = prefs.getBoolean(KEY_MARK, true)
         val crops = prefs.getBoolean(KEY_CROPS, true)
@@ -310,7 +312,6 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         flashJob?.cancel()
         _ui.update { it.copy(status = "Counting...", statusIsSeven = false, busy = true, liveResult = null) }
         viewModelScope.launch {
-            var openedCheck = false
             try {
                 val det = try {
                     withContext(Dispatchers.Default) { DiceDetector.detectRoll(image, roi) }
@@ -353,19 +354,14 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     _ui.update { it.copy(busy = false) }
                 } else {
+                    // The phone is mounted. A failed read must not stop on a screen
+                    // that needs a tap. Save the photo as unread, sound the two
+                    // tones, and stay on the live camera for the next throw.
                     val reason = readFailureReason(det, shot, px)
                     feedback.onUnread(_ui.value.soundOn)
-                    val rollId = saveRoll(0, 0, jpeg, image, det, userChanged = false, unread = true, reason = reason)
-                    val (face1, face2) = CaptureDecision.pickerFaces(det)
-                    openedCheck = true
-                    _ui.update {
-                        it.copy(
-                            status = "Could not read the dice. $reason",
-                            statusIsSeven = false,
-                            busy = false,
-                            pending = PendingCheck(jpeg, face1, face2, det, reason, rollId)
-                        )
-                    }
+                    saveRoll(0, 0, jpeg, image, det, userChanged = false, unread = true, reason = reason)
+                    _ui.update { it.copy(busy = false, manualCapture = false) }
+                    publishLiveStatus()
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "count failed", t)
@@ -377,7 +373,7 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } finally {
-                if (!openedCheck) counting.set(false)
+                counting.set(false)
             }
         }
     }
@@ -708,7 +704,92 @@ class TrackerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun openRoll(id: Long) {
+        val roll = currentRolls.find { it.id == id } ?: return
+        if (roll.unread && roll.source != PracticeStats.SOURCE_QUICK && !roll.photoPath.isNullOrBlank()) {
+            openUnreadCheck(roll)
+        } else {
+            openDetail(id)
+        }
+    }
+
     fun openDetail(id: Long) = _ui.update { it.copy(detailId = id) }
+
+    /** An unread row, opened later from the list. The live camera is not blocked until this tap. */
+    private fun openUnreadCheck(roll: RollEntity) {
+        val path = roll.photoPath ?: return
+        viewModelScope.launch {
+            val jpeg = withContext(Dispatchers.IO) {
+                val file = java.io.File(path)
+                if (!file.isFile) null else file.readBytes()
+            }
+            if (jpeg == null) {
+                openDetail(roll.id)
+                return@launch
+            }
+            val det = withContext(Dispatchers.Default) {
+                try {
+                    val bmp = decodeUpright(jpeg)
+                    val image = bmp.toRgbImage()
+                    if (!bmp.isRecycled) bmp.recycle()
+                    DiceDetector.detectRoll(image, null)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "unread reopen failed", t)
+                    null
+                }
+            }
+            val (face1, face2) = if (det != null && det.ok && det.confidence == "high") {
+                CaptureDecision.pickerFaces(det)
+            } else {
+                null to null
+            }
+            _ui.update {
+                it.copy(
+                    showManual = false,
+                    detailId = null,
+                    pending = PendingCheck(
+                        jpeg,
+                        face1,
+                        face2,
+                        det,
+                        roll.readReason ?: "Could not read the dice.",
+                        roll.id
+                    )
+                )
+            }
+        }
+    }
+
+    /** Mark a saved unread photo as a 7 or a miss, with no die faces, so it counts. */
+    fun resolvePendingQuick(seven: Boolean) {
+        val pending = _ui.value.pending ?: return
+        viewModelScope.launch {
+            if (pending.rollId > 0) {
+                val roll = db.rolls().get(pending.rollId)
+                if (roll != null) {
+                    db.rolls().update(
+                        roll.copy(
+                            d1 = 0,
+                            d2 = 0,
+                            total = if (seven) 7 else 0,
+                            corrected = true,
+                            unread = false,
+                            readReason = null,
+                            leftFace = null,
+                            rightFace = null,
+                            isSeven = seven,
+                            source = PracticeStats.SOURCE_QUICK
+                        )
+                    )
+                    db.sessions().setEnded(roll.sessionId, System.currentTimeMillis())
+                    feedback.onClearRead(seven, _ui.value.soundOn)
+                    showFlash(if (seven) "Logged 7" else "Logged No 7", seven)
+                }
+            }
+            _ui.update { it.copy(pending = null) }
+            counting.set(false)
+        }
+    }
     fun closeDetail() = _ui.update { it.copy(detailId = null, confirmDelete = false) }
     fun askDelete() = _ui.update { it.copy(confirmDelete = true) }
     fun cancelDelete() = _ui.update { it.copy(confirmDelete = false) }

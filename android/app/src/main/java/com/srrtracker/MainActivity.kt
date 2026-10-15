@@ -54,6 +54,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -300,17 +301,14 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
             color = statusColor(state),
             fontSize = 28.sp,
             fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
-        )
-        Text(
-            "dice seen: ${state.diceSeen}",
-            color = if (state.diceSeen == 2) Good else Muted,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(bottom = 6.dp)
+            modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
         )
         Box(
-            Modifier.fillMaxWidth().height(210.dp).background(Color.Black, RoundedCornerShape(16.dp))
+            Modifier
+                .fillMaxWidth()
+                .height(210.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color.Black)
         ) {
             CameraPane(
                 vm,
@@ -319,6 +317,31 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
             )
             FramingOverlay(state.diceInBox, state.frame, vm::setFrame, Modifier.fillMaxSize())
             state.liveResult?.let { ResultFlash(it) }
+        }
+        val unread = state.rows.count { it.unread }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "dice seen: ${state.diceSeen}",
+                color = if (state.diceSeen == 2) Color.Black else Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .background(
+                        if (state.diceSeen == 2) Good else Color(0xFF3A3A42),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+            Text(
+                "$unread unread",
+                color = if (unread > 0) Color(0xFFFFC107) else Muted,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold
+            )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = { vm.nudgeZoom(-0.15f) }) { Text("−", color = Ink, fontSize = 28.sp) }
@@ -364,7 +387,7 @@ private fun MainScreen(vm: TrackerViewModel, state: UiState) {
         } else {
             Text("Newest first. Tap a roll to see the photo.", color = Muted, fontSize = 14.sp)
             LazyColumn(Modifier.weight(1f)) {
-                items(state.rows, key = { it.id }) { row -> RollLine(row) { vm.openDetail(row.id) } }
+                items(state.rows, key = { it.id }) { row -> RollLine(row) { vm.openRoll(row.id) } }
             }
         }
     }
@@ -465,6 +488,10 @@ private fun CheckScreen(vm: TrackerViewModel, pending: PendingCheck, notice: Str
             }
         }
         if (!notice.isNullOrBlank()) Text(notice, color = Good, fontSize = 16.sp)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            BigButton("No 7", { vm.resolvePendingQuick(false) }, Modifier.weight(1f), primary = false)
+            BigButton("7", { vm.resolvePendingQuick(true) }, Modifier.weight(1f))
+        }
         DiePicker("Left die", pending.d1) { vm.pickPending(0, it) }
         DiePicker("Right die", pending.d2) { vm.pickPending(1, it) }
         val face1 = pending.d1
@@ -685,7 +712,14 @@ private fun SettingsDialog(vm: TrackerViewModel, state: UiState) {
                 valueRange = 0.3f..1.5f,
                 steps = 5
             )
-            Text(String.format("%.1f seconds", state.settleMs / 1000f), color = Muted, fontSize = 16.sp)
+            Text(
+                String.format(
+                    "%.1f seconds. Two dice are photographed after about a second of stillness.",
+                    state.settleMs / 1000f
+                ),
+                color = Muted,
+                fontSize = 16.sp
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Sounds", color = Ink, fontSize = 18.sp, modifier = Modifier.weight(1f))
                 Switch(checked = state.soundOn, onCheckedChange = { vm.setSound(it) })
@@ -761,14 +795,27 @@ private fun CameraPane(vm: TrackerViewModel, running: Boolean, modifier: Modifie
         onDispose { capture.stop() }
     }
     AndroidView(
-        modifier = modifier,
+        modifier = modifier.clip(RoundedCornerShape(16.dp)),
         factory = { ctx ->
-            PreviewView(ctx).apply {
+            val preview = PreviewView(ctx).apply {
                 scaleType = PreviewView.ScaleType.FILL_CENTER
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                clipToOutline = true
+            }
+            android.widget.FrameLayout(ctx).apply {
+                clipChildren = true
+                clipToPadding = true
+                addView(
+                    preview,
+                    android.widget.FrameLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                )
             }
         },
-        update = { view ->
+        update = { frame ->
+            val view = frame.getChildAt(0) as PreviewView
             if (view.tag == "bound") return@AndroidView
             view.doOnLayout {
                 if (view.tag == "bound") return@doOnLayout

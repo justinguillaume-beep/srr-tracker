@@ -12,7 +12,7 @@ import kotlin.math.abs
  */
 class MotionGate(
     var sensitivity: Int = 50,
-    var settleMs: Long = 500L,
+    var settleMs: Long = 1000L,
     var rearmMs: Long = 200L
 ) {
     enum class Phase { PAUSED, ARMED, MOVING, SETTLING, HOLD }
@@ -43,6 +43,9 @@ class MotionGate(
     private var holdStableSince = -1L
     private var holdQuietUntil = 0L
     private var stampSettleOnNext = false
+    /** Saw a single die, and saw a pair, during this still period. */
+    private var flickLow = false
+    private var flickHigh = false
 
     /** The on-screen box. Detection and "dice in the box" use only this rectangle. */
     var frame: NormRect = CameraBox.asRect()
@@ -55,6 +58,7 @@ class MotionGate(
                 holdMotionSince = -1L
                 emptySince = -1L
                 stampSettleOnNext = false
+                resetFlicker()
             } else if (phase == Phase.PAUSED) {
                 phase = Phase.ARMED
                 stillSince = 0L
@@ -63,6 +67,7 @@ class MotionGate(
                 hasHoldRef = false
                 holdStableSince = -1L
                 stampSettleOnNext = false
+                resetFlicker()
             }
         }
 
@@ -80,15 +85,23 @@ class MotionGate(
 
     /**
      * [coloredDice] is how many colored dice the preview locator saw in the box.
-     * When it is passed, only a pair (exactly two) can arm a capture. Luminance
+     * When it is passed, a pair (exactly two) arms a capture, and so does a count
+     * that flickers between one and two while the dice stay still. Luminance
      * contrast alone is not dice: the teal rail is darker than the cloth and
      * used to look like a subject. Unit tests omit it and keep the luminance gate.
      */
     fun onFrame(gray: IntArray, nowMs: Long, coloredDice: Int? = null): FrameInfo {
         require(gray.size == W * H)
-        val present = if (coloredDice != null) coloredDice == 2 else diceInBox(gray)
-        val seen = coloredDice ?: 0
         val moving = if (!hasPrev) false else hotCount(prev, gray) >= minHot
+        val flicker = if (coloredDice != null) flickerPresent(coloredDice, moving) else false
+        // A steady pair captures. If the count flickers between 1 and 2 while
+        // the dice are still, capture anyway and let the full-resolution reader decide.
+        val present = when {
+            coloredDice == null -> diceInBox(gray)
+            coloredDice == 2 || flicker -> true
+            else -> false
+        }
+        val seen = coloredDice ?: 0
         var capture = false
         var roi: NormRect? = null
         var detail = "waiting"
@@ -148,7 +161,7 @@ class MotionGate(
                     copy(gray, lastStill)
                     hasStill = true
                     detail = "box emptied while settling"
-                } else if (nowMs - stillSince >= settleMs) {
+                } else if (nowMs - stillSince >= waitMs(coloredDice != null)) {
                     capture = true
                     phase = Phase.HOLD
                     holdMotionSince = -1L
@@ -234,6 +247,32 @@ class MotionGate(
             }
         }
         return info(phase, capture, present, roi, stage, detail, seen)
+    }
+
+    /**
+     * How long a colored pair has to sit still. About a second, even when an
+     * older setting asked for less. The luminance gate used by tests keeps
+     * [settleMs] as it was set.
+     */
+    private fun waitMs(colored: Boolean): Long = if (colored) settleMs.coerceAtLeast(1000L) else settleMs
+
+    /**
+     * True once this still period has seen both one die and two dice.
+     * Motion, an empty box, or three-plus dice starts the period over.
+     */
+    private fun flickerPresent(count: Int, moving: Boolean): Boolean {
+        if (moving || count <= 0 || count > 2) {
+            resetFlicker()
+            return false
+        }
+        if (count == 1) flickLow = true
+        if (count == 2) flickHigh = true
+        return flickLow && flickHigh
+    }
+
+    private fun resetFlicker() {
+        flickLow = false
+        flickHigh = false
     }
 
     /**

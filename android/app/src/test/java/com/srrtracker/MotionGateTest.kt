@@ -243,7 +243,8 @@ class MotionGateTest {
         armed.running = true
         armed.onFrame(felt(), 0, coloredDice = 2)
         armed.onFrame(felt(), 40, coloredDice = 2)
-        assertTrue(armed.onFrame(felt(), 40 + 200, coloredDice = 2).shouldCapture)
+        assertFalse(armed.onFrame(felt(), 40 + 200, coloredDice = 2).shouldCapture)
+        assertTrue(armed.onFrame(felt(), 40 + 1000, coloredDice = 2).shouldCapture)
     }
 
     @Test
@@ -270,7 +271,7 @@ class MotionGateTest {
         gate.onFrame(felt(), 0, coloredDice = 0)
         gate.onFrame(spot, 40, coloredDice = 2)
         gate.onFrame(spot, 80, coloredDice = 2)
-        val capturedAt = 80L + 300L
+        val capturedAt = 80L + 1000L
         assertTrue(gate.onFrame(spot, capturedAt, coloredDice = 2).shouldCapture)
         assertFalse(gate.onFrame(spot, capturedAt + 500, coloredDice = 2).shouldCapture)
 
@@ -285,7 +286,7 @@ class MotionGateTest {
         gate.onFrame(spot, backAt, coloredDice = 2)
         val settling = gate.onFrame(spot, backAt + 40, coloredDice = 2)
         assertEquals(MotionGate.Phase.SETTLING, settling.phase)
-        val shot = gate.onFrame(spot, backAt + 40 + 300, coloredDice = 2)
+        val shot = gate.onFrame(spot, backAt + 40 + 1000, coloredDice = 2)
         assertTrue("a new throw on the same spot must be logged", shot.shouldCapture)
     }
 }
